@@ -1,0 +1,16 @@
+/target/
+/smoke*.png
+/smoke*.txt
+/cap_*.png
+/*_err.txt
+/*_out.txt
+/o.txt
+/e.txt
+ctl_*.txt
+high_score.json
+settings.json
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
