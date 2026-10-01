@@ -1,0 +1,30 @@
+[package]
+name = "tetrafusion"
+version = "2.1.0"
+edition = "2021"
+description = "A Rust port of TetraFusion 2.1 by drDOOM69GAMING (MIT)"
+
+[dependencies]
+# 5.5 uses a handle API: a RaylibHandle owns the window, and each frame hands
+# out a DrawHandle that drawing calls go through. Drawing is separate from
+# input and window state, which is a fine fit here.
+raylib = "5.5"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The custom-music folder is chosen with the desktop's own folder dialog,
+# opened from `src/folderpick.rs`: the Windows shell's `IFileOpenDialog`,
+# `NSOpenPanel` through `osascript` on macOS, and `zenity` on Linux - which is
+# exactly what the original shelled out to. That is deliberately not a crate
+# dependency: every Windows dialog crate reaches the API through `windows-sys`,
+# whose generated `user32` bindings also declare `CloseWindow`, and raylib's C
+# code defines its own `CloseWindow`. The two collide at link time and the
+# release build fails with LNK2005.
+#
+# A machine with no picker at all (no `zenity`, a stripped container) falls
+# back to the in-game browser, so nothing depends on the dialog existing.
+
+[profile.release]
+opt-level = 3
+lto = true
