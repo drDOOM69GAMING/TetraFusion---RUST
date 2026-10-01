@@ -9,11 +9,13 @@ mod assets;
 mod audio;
 mod backgrounds;
 mod board;
+mod celebrate;
 mod config;
 mod effects;
 mod folderpick;
 mod game;
 mod keys;
+mod manual;
 mod music_dir;
 mod pad;
 mod pieces;
@@ -77,6 +79,26 @@ enum OverAction {
     Initials,
     /// Nothing pressed.
     None,
+}
+
+/// Where a finished run goes, and whether it is worth celebrating.
+///
+/// Returns the screen to switch to and whether a new record was set, because
+/// the two were being decided in the same `if` and only one of them was
+/// reachable from anywhere testable. The celebration is the part that suffers:
+/// it fires on exactly one frame in a whole run, so a mistake in it - firing on
+/// every top-out, or never firing at all - is invisible until a player finishes
+/// a run either way.
+///
+/// `record` is [`scores::Scores::is_record`], the same test `submit` uses, so a
+/// player is never offered a celebration for a score the table would then
+/// refuse to file.
+fn run_end(record: bool) -> (Screen, bool) {
+    if record {
+        (Screen::Initials, true)
+    } else {
+        (Screen::Over, false)
+    }
 }
 
 /// Decide what the game-over screen does with this frame's input.
@@ -256,6 +278,9 @@ fn key_const_letter(c: i32) -> Key {
 
 /// Which screen is up.
 #[derive(Clone)]
+/// `Debug` only for the tests: a failure in the screen-state assertions below
+/// names the screen it was about, which is the whole value of a failing assert.
+#[cfg_attr(test, derive(Debug))]
 enum Screen {
     Menu,
     Playing,
@@ -270,6 +295,13 @@ enum Screen {
     /// key typing an `R` or the letters not being typeable.
     Initials,
     Settings { sel: usize },
+    /// The manual, one page at a time.
+    ///
+    /// `page` is an index into [`manual::PAGES`], not a scroll offset: each
+    /// page is written to fit the screen on its own, so there is nothing to
+    /// scroll and every page is reachable by turning from either end. See
+    /// [`manual::turn`], which is what keeps UP and DOWN symmetric.
+    Manual { page: usize },
     /// The Keyboard Keybinds screen, a submenu of Options.
     ///
     /// `capturing` is `Some(action)` while waiting for the player to press the
@@ -299,7 +331,24 @@ enum Screen {
     },
 }
 
-/// The keybind screen's row count: one per action, plus Back.
+/// Whether this screen is the end of a finished run, as opposed to a run in
+/// progress or to being away from the game entirely.
+///
+/// The two end-of-run screens are [`Screen::Over`] and [`Screen::Initials`], and
+/// the audio driver has to treat them identically. It used to check for `Over`
+/// alone, so a run that set a record went to `Initials`, skipped the whole
+/// game-over block, and left the heartbeat looping underneath the initials
+/// prompt. Worse, the run that actually ended the game was the quiet one: the
+/// sting and the silenced heartbeat only ever played for a run that failed to
+/// beat the record.
+///
+/// Deliberately not a flag on `Over`, because `Initials` is a screen in its own
+/// right and this is a question about screens.
+impl Screen {
+    fn run_has_ended(&self) -> bool {
+        matches!(self, Screen::Over | Screen::Initials)
+    }
+}
 const KEYBIND_ROWS: usize = settings::ACTIONS.len() + 1;
 const KEYBIND_BACK: usize = settings::ACTIONS.len();
 
@@ -847,14 +896,48 @@ fn main() {
     // gives an empty table, so this cannot stop the game starting.
     let mut table = scores::Scores::load();
     let mut initials = scores::Initials::new();
-    let total_w = config::SCREEN_WIDTH + config::SUBWINDOW_WIDTH;
+    // The render texture is the whole layout, playfield plus panel. The background
+    // photo is fitted to this same number, so the two cannot drift apart.
+    let total_w = config::CONTENT_WIDTH;
 
+    // The window is larger than the layout by `WINDOW_MARGIN` on every side.
+    // The playfield fills `SCREEN_WIDTH` x `SCREEN_HEIGHT` exactly, so a window
+    // sized to the layout leaves the board hard against the framebuffer and the
+    // last row of cells hard against the bottom pixel row. `render::present`
+    // scales against the padded layout and centres the game inside it, so at the
+    // native size the picture is still pixel for pixel 1:1 and simply has a
+    // clear border around it.
     let (mut rl, thread) = raylib::init()
-        .size(total_w, config::SCREEN_HEIGHT)
-        .title("TetraFusion 2.1 - rust edition")
+        .size(
+            total_w + 2 * config::WINDOW_MARGIN,
+            config::SCREEN_HEIGHT + 2 * config::WINDOW_MARGIN,
+        )
+        .title(config::WINDOW_TITLE)
         .resizable()
         .build();
     rl.set_target_fps(60);
+
+    // Take the exit key away from raylib so ESC reaches the game.
+    //
+    // raylib's GLFW backend defaults `exitKey` to KEY_ESCAPE and, in its own key
+    // callback, calls `glfwSetWindowShouldClose(handle, GLFW_TRUE)` the instant
+    // that key goes down. That happens *before* the key state the game reads, so
+    // from the game's point of view ESC never happened: `IsKeyPressed(ESCAPE)`
+    // is false on every frame and the window has already been told to close. The
+    // result is that the game's own Escape handling is dead code everywhere, and
+    // ESC appears to "exit the game" from any screen, including ones where it
+    // should only step back.
+    //
+    // This is not a workaround for one screen; it is what makes ESC mean
+    // "pause" in a run, "back" in the manual, the options and the keybind
+    // screens, and "quit" only from the main menu, which is what the footers on
+    // all of those screens already promise the player.
+    //
+    // `None` is raylib's "no exit key" (KEY_NULL): nothing at all can close the
+    // window by keyboard, so the game decides. It sets `quit` itself from the
+    // main menu, and the player can still close the window with the title bar's
+    // X, Alt+F4, or the taskbar's close.
+    rl.set_exit_key(exit_key());
 
     // The window icon. `SetWindowIcon` only has an effect after the window
     // exists, which is why this cannot be part of the `init()` builder above.
@@ -896,6 +979,25 @@ fn main() {
     let mut target = rl
         .load_render_texture(&thread, total_w as u32, config::SCREEN_HEIGHT as u32)
         .expect("could not create the game render texture");
+
+    // Smooth scaling when the game is stretched to fill a bigger framebuffer.
+    //
+    // This texture is the one every pixel of the game is drawn into and then
+    // scaled to the screen by `render::present`, so its magnification filter is
+    // what decides whether fullscreen looks crisp or blocky. raylib creates
+    // render textures with `GL_NEAREST`: in `rlLoadTexture` the magnification and
+    // minification filters are set to `GL_NEAREST`, and only textures with more
+    // than one mipmap level are upgraded to linear afterwards. A render texture
+    // is created with exactly one, so it keeps nearest. Upscaling a 450x930 board
+    // by 2.3x with nearest sampling gives hard, stair-stepped edges on every
+    // block edge and on the bitmap font, which is the "very pixelated" look.
+    //
+    // `BILINEAR` interpolates between the four nearest texels instead, so a
+    // non-integer scale is smooth. It is the right choice here rather than
+    // `NEAREST`: the game draws vector rectangles and raylib's 10px bitmap font,
+    // neither of which gains anything from hard pixel edges, and at 1:1 in the
+    // default window this changes nothing because there is no scale to filter.
+    target.set_texture_filter(&thread, raylib::consts::TextureFilter::TEXTURE_FILTER_BILINEAR);
 
     // `TF_WINSIZE=1920x1080` forces the window size, so the scale-to-fit path
     // can be exercised headlessly the way F11/fullscreen exercises it by hand.
@@ -974,6 +1076,7 @@ fn main() {
     // four-line clear, like the original's `tetris_last_flash` window.
     let mut tetris_flash_until: u64 = 0;
     let mut particles = effects::Particles::new(&cfg.effect);
+    let mut celebration = celebrate::Celebration::new();
     let mut pad_state = PadState::new();
 
     if smoke {
@@ -1022,7 +1125,9 @@ fn main() {
                         level_flash_until = 0;
                         tetris_flash_until = 0;
                         screen = Screen::Playing;
-                    } else if selected == modes {
+                    } else if selected == MANUAL_ROW {
+                        screen = Screen::Manual { page: 0 };
+                    } else if selected == OPTIONS_ROW {
                         screen = Screen::Settings { sel: 0 };
                     } else {
                         quit = true;
@@ -1200,11 +1305,14 @@ fn main() {
                     let record = g
                         .as_ref()
                         .is_some_and(|g| table.is_record(g.mode, g.score));
-                    screen = if record {
-                        Screen::Initials
-                    } else {
-                        Screen::Over
-                    };
+                    let (next, is_record) = run_end(record);
+                    if is_record {
+                        // Started here rather than on the initials screen itself
+                        // so the pieces are already in the air on the first frame
+                        // the player sees, instead of appearing a beat after it.
+                        celebration.start(now);
+                    }
+                    screen = next;
                 }
             }
             Screen::Paused { sel } => {
@@ -1308,14 +1416,41 @@ fn main() {
                         tetris_flash_until = 0;
                         level_fx = None;
                         initials = scores::Initials::new();
+                        // The shards belong to the run that is over. Stopping
+                        // here rather than clearing them lets the ones already in
+                        // the air land on the new board, which is what a
+                        // celebration trailing off behind a quick restart should
+                        // look like.
+                        celebration.stop();
                         screen = Screen::Playing;
                     }
                     OverAction::MainMenu => {
                         // No save. The record stands and the run is gone, which is
                         // what pressing Escape on a record screen should mean.
+                        celebration.stop();
                         screen = Screen::Menu;
                     }
                     OverAction::None => {}
+                }
+            }
+            Screen::Manual { page } => {
+                let mut page = page;
+                if input.up || input.nav_up {
+                    page = manual::turn(page, -1);
+                }
+                if input.down_pressed || input.nav_down {
+                    // One page per press, like every other menu in the game:
+                    // holding DOWN should not tear through the book.
+                    page = manual::turn(page, 1);
+                }
+                if input.quit || input.confirm {
+                    // ESC and ENTER both go back. The book is read, not
+                    // adjusted, so there is nothing for ENTER to confirm and
+                    // leaving on either key means a player who reaches for the
+                    // wrong one is never trapped on the page.
+                    screen = Screen::Menu;
+                } else {
+                    screen = Screen::Manual { page };
                 }
             }
             Screen::Settings { sel } => {
@@ -1530,7 +1665,7 @@ fn main() {
         }
         // Feed this frame's events to the audio layer before drawing.
         if let Some(a) = audio.as_mut() {
-            let over = matches!(screen, Screen::Over);
+            let over = screen.run_has_ended();
             let live = matches!(
                 screen,
                 Screen::Playing | Screen::Paused { .. } | Screen::Over
@@ -1554,6 +1689,7 @@ fn main() {
             },
         );
         particles.update(dt, wind);
+        celebration.update(dt, now);
 
         let grid = grid_color(&cfg);
         let ghost_a = if cfg.ghost_piece {
@@ -1630,6 +1766,9 @@ fn main() {
                             render::draw_menu_blurb(&mut tm, Mode::ALL[selected]);
                         }
                     }
+                    Screen::Manual { page } => {
+                        render::draw_manual(&mut tm, *page, t as f32);
+                    }
                     Screen::Settings { sel } => {
                         let rows = settings_rows(&cfg, audio.as_ref());
                         render::draw_settings(&mut tm, *sel, &rows, t as f32);
@@ -1664,7 +1803,7 @@ fn main() {
                             backgrounds.draw(&mut tm, game.level, cfg.backgrounds_enabled);
                             render::draw_board(&mut tm, game, &palette, ghost_a, offset, grid, look, fx);
                             particles.draw(&mut tm, offset);
-                            render::draw_panel(&mut tm, game, total_w, t, &palette, tetris_flash, look, pkeep, now);
+                            render::draw_panel(&mut tm, game, total_w, t, &palette, tetris_flash, look, pkeep, now, &table);
                             render::draw_event_flash(&mut tm, game, t as f32);
                             if let Some(lv) = level_banner {
                                 let tint = palette[(lv as usize).clamp(1, 7)];
@@ -1677,7 +1816,7 @@ fn main() {
                             backgrounds.draw(&mut tm, game.level, cfg.backgrounds_enabled);
                             render::draw_board(&mut tm, game, &palette, ghost_a, offset, grid, look, fx);
                             particles.draw(&mut tm, offset);
-                            render::draw_panel(&mut tm, game, total_w, t, &palette, tetris_flash, look, pkeep, now);
+                            render::draw_panel(&mut tm, game, total_w, t, &palette, tetris_flash, look, pkeep, now, &table);
                             render::draw_pause_menu(&mut tm, *sel, t as f32);
                             render::draw_high_score(&mut tm, game.mode, &table);
                         }
@@ -1686,7 +1825,15 @@ fn main() {
                         if let Some(game) = g.as_ref() {
                             backgrounds.draw(&mut tm, game.level, cfg.backgrounds_enabled);
                             render::draw_board(&mut tm, game, &palette, ghost_a, offset, grid, look, fx);
-                            render::draw_panel(&mut tm, game, total_w, t, &palette, tetris_flash, look, pkeep, now);
+                            render::draw_panel(&mut tm, game, total_w, t, &palette, tetris_flash, look, pkeep, now, &table);
+                            // Behind the prompt, not over it. The player has three
+                            // letters to type and a standing record to compare
+                            // against, both of which are drawn by the call below;
+                            // burying either under a screenful of pieces would trade
+                            // the one moment that earned the celebration for the
+                            // moment it is trying to celebrate. It covers the panel
+                            // as well as the well, which is the point of it.
+                            celebration.draw(&mut tm);
                             render::draw_initials(
                                 &mut tm,
                                 &run_summary(game, game.elapsed_ms(now)),
@@ -1700,7 +1847,7 @@ fn main() {
                         if let Some(game) = g.as_ref() {
                             backgrounds.draw(&mut tm, game.level, cfg.backgrounds_enabled);
                             render::draw_board(&mut tm, game, &palette, ghost_a, offset, grid, look, fx);
-                            render::draw_panel(&mut tm, game, total_w, t, &palette, tetris_flash, look, pkeep, now);
+                            render::draw_panel(&mut tm, game, total_w, t, &palette, tetris_flash, look, pkeep, now, &table);
                             // Three-way, not win/lose. Finishing a Sprint is
                             // "SPRINT COMPLETE", Ultra's clock running out is
                             // "TIME UP", and only a top-out is "GAME OVER" - the
@@ -1777,8 +1924,17 @@ fn main() {
     // The window closes when RaylibHandle drops.
 }
 
+/// The menu entry indexes that are not modes.
+///
+/// Spelled out as constants because three different places have to agree on
+/// where these sit: the length calculation, the label list, and the confirm
+/// handler that turns an index into a screen. Bare arithmetic in one of them
+/// is how a mode row ends up opening the manual.
+const MANUAL_ROW: usize = Mode::ALL.len();
+const OPTIONS_ROW: usize = Mode::ALL.len() + 1;
+
 fn menu_len() -> usize {
-    Mode::ALL.len() + 2 // modes + Options + Quit
+    Mode::ALL.len() + 3 // modes + Manual + Options + Quit
 }
 
 /// How many choices the pause menu offers (Resume / Restart / Quit to Menu),
@@ -1787,6 +1943,7 @@ const PAUSE_OPTIONS: usize = 3;
 
 fn menu_labels() -> Vec<String> {
     let mut v: Vec<String> = Mode::ALL.iter().map(|m| m.label().to_string()).collect();
+    v.push("Manual".to_string());
     v.push("Options".to_string());
     v.push("Quit".to_string());
     v
@@ -2232,11 +2389,80 @@ fn cycle_setting(cfg: &mut settings::Settings, sel: usize) -> bool {
     false
 }
 
+/// The exit key the game hands raylib, which is none at all.
+///
+/// Its own function so the test can ask the game what it decided, rather than
+/// reading the source back out of the file. A source check would only prove what
+/// the file says, not what the running game does.
+fn exit_key() -> Option<raylib::ffi::KeyboardKey> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // --- the two results screens ----------------------------------------
+
+    /// A celebration fires on the run that set a record, and on nothing else.
+    ///
+    /// The whole feature hangs off one frame in one arm of one `match`, reached
+    /// only by finishing a run, which is exactly the kind of thing that can be
+    /// wired to the wrong condition and go unnoticed for months. Both
+    /// directions are pinned: firing on a top-out that beat nothing would put a
+    /// party on the game's most common screen, and not firing on a record would
+    /// leave the celebration as code that is never reached.
+    ///
+    /// The two halves are also asserted to agree, which is the part that is easy
+    /// to get wrong by editing one and not the other - a record screen with no
+    /// celebration, or a celebration on a screen asking for no initials.
+    #[test]
+    fn only_a_run_that_set_a_record_is_celebrated() {
+        for record in [false, true] {
+            let (screen, celebrated) = run_end(record);
+            assert_eq!(
+                celebrated, record,
+                "a run with record={record} celebrated={celebrated}"
+            );
+            assert_eq!(
+                matches!(screen, Screen::Initials),
+                record,
+                "a run with record={record} went to {screen:?}"
+            );
+        }
+    }
+
+    /// Both end-of-run screens have to count as "the run has ended".
+    ///
+    /// The audio driver uses this to decide whether to play the game-over sting
+    /// and stop the heartbeat. It asked only about `Over`, so a run that set a
+    /// record went to `Initials` instead, never reached that code, and left the
+    /// heartbeat looping under the initials prompt - on precisely the runs the
+    /// player was happiest about. The sting and the silenced heartbeat are the
+    /// reward for a good run; they can only be missing from good runs if this
+    /// question is asked of the wrong screen.
+    ///
+    /// The negatives are pinned as well as the positives, because the whole
+    /// failure mode here is a screen quietly counted as finished: a menu or a
+    /// pause screen answering true would silence the music mid-run.
+    #[test]
+    fn both_end_of_run_screens_count_as_the_run_being_over() {
+        for screen in [
+            Screen::Over,
+            Screen::Initials,
+            Screen::Menu,
+            Screen::Playing,
+            Screen::Paused { sel: 0 },
+            Screen::Manual { page: 0 },
+            Screen::Settings { sel: 0 },
+        ] {
+            assert_eq!(
+                screen.run_has_ended(),
+                matches!(screen, Screen::Over | Screen::Initials),
+                "{screen:?} answered the wrong way"
+            );
+        }
+    }
 
     /// The whole alphabet has to be typeable on the initials screen.
     ///
@@ -2421,10 +2647,12 @@ mod tests {
     // --- grid visibility ------------------------------------------------
 
     #[test]
-    fn the_grid_is_drawn_at_the_full_opacity_by_default() {
+    fn the_grid_is_drawn_faintly_at_64_by_default() {
+        // A fresh install draws the lattice as a guide, not a cage: 64 on the
+        // 0-255 scale, one of the four stops the Options row steps between.
         let cfg = settings::Settings::default();
         let c = grid_color(&cfg).expect("grid on by default");
-        assert_eq!(c.a, 255);
+        assert_eq!(c.a, 64);
         // The colour must still be the theme's own lattice colour, only the
         // alpha is player-controlled.
         let theme_grid = config::THEMES[cfg.theme % config::THEMES.len()].grid;
@@ -2963,18 +3191,38 @@ mod tests {
 
     #[test]
     fn grid_opacity_cycles_visible_barely_none_and_back() {
-        // Matches the original's `grid_opacity` handling exactly, so the
-        // "visible / barely / none" stops land where the original put them.
+        // Matches the original's `grid_opacity` handling exactly: a 64 step
+        // that wraps 255 -> 0, so every stop is reachable from every other.
+        // The walk below starts at 64, the fresh install default, and has to
+        // come back round to 64 rather than to 255.
         let mut cfg = settings::Settings::default();
         let mut seen = vec![cfg.grid_opacity];
         for _ in 0..5 {
             assert!(!cycle_setting(&mut cfg, ROW_GRID_OPACITY));
             seen.push(cfg.grid_opacity);
         }
-        assert_eq!(seen, vec![255, 0, 64, 128, 192, 255]);
+        assert_eq!(seen, vec![64, 128, 192, 255, 0, 64]);
         // And it keeps cycling rather than sticking at the top.
         assert!(!cycle_setting(&mut cfg, ROW_GRID_OPACITY));
-        assert_eq!(cfg.grid_opacity, 0);
+        assert_eq!(cfg.grid_opacity, 128);
+    }
+
+    /// Every stop the Options row can reach has to actually change what is
+    /// drawn, or the row is a label on nothing.
+    #[test]
+    fn every_grid_opacity_stop_looks_different() {
+        let mut cfg = settings::Settings::default();
+        let mut seen = vec![cfg.grid_opacity];
+        for _ in 0..4 {
+            assert!(!cycle_setting(&mut cfg, ROW_GRID_OPACITY));
+            seen.push(cfg.grid_opacity);
+        }
+        // 64 -> 128 -> 192 -> 255 -> 0, all distinct, and 0 is the off case.
+        assert_eq!(seen, vec![64, 128, 192, 255, 0]);
+        let mut unique = seen.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), seen.len(), "two stops drew the same thing");
     }
 
     #[test]
@@ -3068,6 +3316,63 @@ mod tests {
     #[test]
     fn a_win_screen_routes_exactly_like_a_loss() {
         assert_eq!(WIN_HINTS, OVER_HINTS);
+    }
+
+    /// raylib must not keep its default exit key, or ESC never reaches the game.
+    ///
+    /// This is the "the whole game quits when I leave the manual" bug, and it is
+    /// worth being exact about what it was. raylib's GLFW backend defaults
+    /// `exitKey` to `KEY_ESCAPE` and, inside its own key callback, calls
+    /// `glfwSetWindowShouldClose(handle, GLFW_TRUE)` the moment that key goes
+    /// down. That is before the key state the game reads, so `IsKeyPressed(ESCAPE)`
+    /// was false on every frame while `WindowShouldClose()` was already true. The
+    /// game's own Escape handling was dead code on every screen: the menu never
+    /// quit through `input.quit`, the manual's ESC-to-back arm could not run, and
+    /// ESC looked like it killed the game from anywhere. Tracing confirmed it, with
+    /// `quit=false` and `should_close=true` at the end of the loop and no
+    /// `KEYPRESS` line for ESC while DOWN and ENTER registered normally.
+    ///
+    /// A unit test cannot open a window and watch GLFW, so this reads the source
+    /// instead and checks the call that fixes it is present and is in `main`. If
+    /// the line is removed, or `set_exit_key` is handed a key again, the Escape
+    /// handling goes dead in exactly the same silent way and this fails.
+    #[test]
+    fn raylib_is_told_have_no_exit_key_so_escape_reaches_the_game() {
+        assert!(
+            exit_key().is_none(),
+            "raylib's exit key must be None, or ESC closes the window before the \
+             game can see it and every screen's ESC handling is dead"
+        );
+        // And the decision has to reach raylib, rather than sitting in a function
+        // nothing calls.
+        let source = include_str!("main.rs");
+        assert!(
+            source.contains("rl.set_exit_key(exit_key())"),
+            "main must hand the cleared exit key to raylib"
+        );
+    }
+
+    /// Prove the guard above is a real guard, by asking about the case it forbids.
+    ///
+    /// A test that only passes is not evidence. raylib's default is ESC, and any
+    /// `Some` here would bring that back, so this pins the only safe answer and
+    /// shows the check is not vacuous: it has to be able to tell `None` from a
+    /// key, and it has to reject the value raylib starts with.
+    #[test]
+    fn any_exit_key_is_the_bug_and_none_is_the_fix() {
+        assert!(exit_key().is_none(), "the game must not give raylib a key");
+        // The distinction the check depends on, spelled out so a change to the
+        // return type cannot quietly make every assertion trivially true.
+        let rearmed: Option<raylib::ffi::KeyboardKey> = Some(raylib::ffi::KeyboardKey::KEY_ESCAPE);
+        assert!(
+            rearmed.is_some(),
+            "the default raylib exit key is exactly what has to be cleared"
+        );
+        assert_ne!(
+            exit_key(),
+            rearmed,
+            "clearing the exit key must differ from leaving it on ESC"
+        );
     }
 }
 

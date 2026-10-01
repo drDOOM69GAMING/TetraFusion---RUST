@@ -469,6 +469,187 @@ mod tests {
         }
     }
 
+    /// The emitted sequence has to be distributed the same way the original's is.
+    ///
+    /// The original's bag is `shapes[:]`, `random.shuffle`, then `bag.pop()`.
+    /// This one is `extend_from_slice(ALL_PIECES)`, `shuffle`, then `pop()`. Those
+    /// are the same algorithm, so no two runs should be expected to agree piece
+    /// for piece - the games are not seeded to each other, and cannot be. What has
+    /// to match is the *distribution*, and the way to show that is to run the
+    /// original's own algorithm side by side with this one and compare the
+    /// statistics that a player can actually feel:
+    ///
+    /// - how often each piece is the one that opens a bag, which is what decides
+    ///   how long a player waits for a piece they want;
+    /// - the worst gap between two of the same piece, which is the whole reason a
+    ///   7-bag exists - the cap at worst 12 drops;
+    /// - that every 7 consecutive draws hold all 7 pieces, so nothing is ever
+    ///   starved on a bad shuffle.
+    ///
+    /// Both sides draw from the same RNG in the same loop, so the two sets of
+    /// figures differ only by sampling noise. The bounds are loose for that
+    /// reason: they are here to catch a bag that is unfair or missing a piece,
+    /// not to certify a specific number.
+    #[test]
+    fn the_bag_is_distributed_like_the_originals() {
+        /// The original's `TetrominoBag`, transcribed. Kept verbatim in shape so
+        /// the comparison is against the original and not against a paraphrase.
+        struct OriginalBag {
+            bag: Vec<Piece>,
+        }
+        impl OriginalBag {
+            fn new() -> Self {
+                let mut me = Self { bag: Vec::new() };
+                me.refill();
+                me
+            }
+            fn refill(&mut self) {
+                self.bag.clear();
+                self.bag.extend_from_slice(&ALL_PIECES);
+                self.bag.shuffle(&mut rand::thread_rng());
+            }
+            fn next_piece(&mut self) -> Piece {
+                if self.bag.is_empty() {
+                    self.refill();
+                }
+                self.bag.pop().expect("bag was just refilled")
+            }
+        }
+
+        /// The statistics gathered for either implementation.
+        #[derive(Default)]
+        struct Stats {
+            /// Draws that opened a bag, per piece.
+            openers: [usize; 7],
+            /// Longest run between two draws of the same piece.
+            worst_gap: usize,
+            /// The last draw of each piece, for measuring gaps.
+            last_seen: [Option<usize>; 7],
+            /// Bags that did not hold all 7 pieces.
+            starved_bags: usize,
+            /// The first such bag, so a failure can name the pieces.
+            starved_example: Option<Vec<Piece>>,
+        }
+
+        /// Fold one draw into whichever set of statistics it belongs to.
+        fn record(into: &mut Stats, theirs: &mut Stats, p: Piece, their_p: Piece, at: usize, both: (Vec<Piece>, Vec<Piece>)) {
+            if at % 7 == 0 {
+                into.openers[p as usize] += 1;
+                theirs.openers[their_p as usize] += 1;
+            }
+            if let Some(prev) = into.last_seen[p as usize] {
+                into.worst_gap = into.worst_gap.max(at - prev);
+            }
+            into.last_seen[p as usize] = Some(at);
+            if let Some(prev) = theirs.last_seen[their_p as usize] {
+                theirs.worst_gap = theirs.worst_gap.max(at - prev);
+            }
+            theirs.last_seen[their_p as usize] = Some(at);
+
+            // Checked on the bag itself, not on a sliding window of seven. A window that
+            // straddles a refill can legitimately hold a duplicate and miss one -
+            // draws 1 to 7 of a bag that began with a T at position 2 will repeat
+            // the T and never see the I that position 0 carried. It is the block
+            // aligned to the refill that has to hold all seven.
+            if at % 7 == 6 {
+                for (stats, window) in [(into, both.0), (theirs, both.1)] {
+                    let mut kinds = window.clone();
+                    kinds.sort_by_key(|p| *p as u8);
+                    kinds.dedup();
+                    if kinds.len() != 7 {
+                        stats.starved_bags += 1;
+                        stats.starved_example = Some(window);
+                    }
+                }
+            }
+        }
+
+        /// Draw `draws` pieces from both bags, gathering the statistics for each.
+        fn measure(draws: usize) -> (Stats, Stats) {
+            let mut bag = Bag::new();
+            let mut original = OriginalBag::new();
+            let (mut mine, mut theirs) = (Stats::default(), Stats::default());
+            let (mut order, mut their_order) = (Vec::with_capacity(draws), Vec::with_capacity(draws));
+
+            for i in 0..draws {
+                let p = bag.next_piece();
+                let their_p = original.next_piece();
+                order.push(p);
+                their_order.push(their_p);
+                // Only the current bag is ever inspected, so collecting into it
+                // costs nothing beyond what is being measured.
+                if i % 7 == 6 {
+                    let window = (order.drain(..).collect(), their_order.drain(..).collect());
+                    record(&mut mine, &mut theirs, p, their_p, i, window);
+                } else {
+                    record(&mut mine, &mut theirs, p, their_p, i, (Vec::new(), Vec::new()));
+                }
+            }
+            (mine, theirs)
+        }
+
+        const DRAWS: usize = 70_000;
+        let (mine, theirs) = measure(DRAWS);
+
+        // Every group of seven holds all seven pieces. This is the property the
+        // player feels as "no piece is ever starved", and it is exact rather than
+        // statistical: a 7-bag cannot get it wrong. Asserted for the original's
+        // bag too, so a failure can be read as "this bag is broken" rather than
+        // having to be re-derived from the transcription.
+        assert_eq!(
+            theirs.starved_bags, 0,
+            "the transcribed original bag produced a short bag {:?}, so the \
+             comparison below would be measuring a broken control",
+            theirs.starved_example
+        );
+        assert_eq!(
+            mine.starved_bags, 0,
+            "a bag of 7 was missing a piece: {:?}",
+            mine.starved_example
+        );
+
+        
+        // 13, not 12: a piece opening one bag and closing the next is 13 draws apart,
+// so 12 is the number of *other* pieces in between. Both bags hit the same
+        // bound, which is itself the comparison worth making.
+        assert_eq!(
+            mine.worst_gap, 13,
+            "a piece went {} draws without appearing, and a 7-bag cannot exceed 13",
+            mine.worst_gap
+        );
+        assert_eq!(
+            theirs.worst_gap, mine.worst_gap,
+            "this bag let a piece go {} draws without appearing where the original \
+             managed {}",
+            mine.worst_gap, theirs.worst_gap
+        );
+
+        // Openers have to be flat. Each piece opens one bag in seven, so over
+        // `DRAWS / 7` openings each piece should lead about `DRAWS / 49` times.
+        // A biased bag here would make some pieces arrive noticeably sooner after
+        // a bag boundary than others, which reads to a player as the game being
+        // unfair even when every individual bag is fair.
+        let openings = DRAWS / 7;
+        let expected = openings as f64 / 7.0;
+        for (piece, count) in mine.openers.iter().enumerate() {
+            let share = *count as f64;
+            assert!(
+                (share - expected).abs() < expected * 0.15,
+                "piece {piece} opened {share:.0} of {openings} bags, expected about \
+                 {expected:.0}, which is too uneven to be one piece in seven"
+            );
+            // Compared against the original's own figure for the same piece, so
+            // "even" is judged against the algorithm rather than against an ideal
+            // that sampling noise alone would sometimes miss.
+            let their_share = theirs.openers[piece] as f64;
+            assert!(
+                (share - their_share).abs() < expected * 0.15,
+                "piece {piece} opened {share:.0} bags where the original opened \
+                 {their_share:.0}"
+            );
+        }
+    }
+
     #[test]
     fn peek_does_not_consume() {
         let mut bag = Bag::new();

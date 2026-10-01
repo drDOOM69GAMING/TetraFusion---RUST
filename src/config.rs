@@ -11,6 +11,32 @@ pub const BLOCK_SIZE: i32 = 30;
 /// Width of the side panel, in pixels.
 pub const SUBWINDOW_WIDTH: i32 = 369;
 
+/// Width of everything the game draws, in layout pixels: the playfield plus the
+/// side panel.
+///
+/// This is the size of the render texture, so it is also the area the background
+/// photo has to cover. Defined once here because the background used to be fitted
+/// to [`SCREEN_WIDTH`] alone: the photo stopped at the right-hand edge of the well
+/// and left the entire panel on the plain backdrop, which made a photo that
+/// changed with the level almost impossible to notice.
+pub const CONTENT_WIDTH: i32 = SCREEN_WIDTH + SUBWINDOW_WIDTH;
+
+/// Clear space kept around the game, in layout pixels.
+///
+/// The playfield is `GRID_HEIGHT * BLOCK_SIZE` tall, which is exactly
+/// `SCREEN_HEIGHT`, and it is `GRID_WIDTH * BLOCK_SIZE` wide, which is exactly
+/// `SCREEN_WIDTH`. Sizing the window to the layout alone therefore puts the
+/// board flush against the framebuffer on every side, with the floor landing on
+/// the very last pixel row. There is no slack at all: the window's title bar and
+/// borders are drawn outside the framebuffer but sit over the top and bottom of
+/// what the player can see, so the outermost cells end up visually cropped.
+///
+/// The window is made `2 * WINDOW_MARGIN` larger than the layout and the margin
+/// is carried through [`crate::render::present`], so the game always sits
+/// `WINDOW_MARGIN` pixels inside the framebuffer at 1:1 and keeps a proportional
+/// border once it is scaled up.
+pub const WINDOW_MARGIN: i32 = 24;
+
 /// Board is 15 x 31.
 pub const GRID_WIDTH: usize = (SCREEN_WIDTH / BLOCK_SIZE) as usize;
 pub const GRID_HEIGHT: usize = (SCREEN_HEIGHT / BLOCK_SIZE) as usize;
@@ -106,6 +132,31 @@ pub const B2B_DEN: i32 = 2;
 /// Rows cleared per level.
 pub const LINES_PER_LEVEL: i32 = 10;
 
+/// The port's own version, taken from `Cargo.toml`.
+///
+/// The version the game prints in the window title and under the main menu
+/// used to be a hand typed string literal, so bumping the package version in
+/// `Cargo.toml` left the game still announcing 2.1. Reading it from the
+/// manifest means there is exactly one place to change it.
+/// The subtitle drawn under `TETRAFUSION` on the main menu, for example
+/// `2.2.0 rust edition`. `concat!` folds the manifest value in at compile
+/// time, so it cannot drift from the package version.
+pub const VERSION_LINE: &str = concat!(env!("CARGO_PKG_VERSION"), " rust edition");
+
+/// The window title. Also folded from the manifest at compile time.
+pub const WINDOW_TITLE: &str = concat!("TetraFusion ", env!("CARGO_PKG_VERSION"), " rust edition");
+
+/// The version of the original Pygame game being ported.
+///
+/// Not the port's own version, which is whatever `Cargo.toml` says. Named, and
+/// test-only, because "2.1" is a substring of every 2.2.x version: a test that
+/// guards the window title against it has to compare whole versions rather
+/// than search the string, and this is where the correct value lives so the
+/// comparison cannot drift back into a substring search. See
+/// `the_version_shown_in_game_comes_from_the_manifest`.
+#[cfg(test)]
+pub const ORIGINAL_GAME_VERSION: &str = "2.1";
+
 /// Lines that must be cleared to win a Sprint.
 pub const SPRINT_TARGET_LINES: i32 = 40;
 /// Duration of an Ultra run, in milliseconds.
@@ -121,6 +172,19 @@ pub const LEVEL_FLASH_INTERVAL: u64 = 100;
 /// How long the "TetraFusion!" banner lights the side panel after a four-line
 /// clear, in milliseconds (the original's `tetris_flash_time`).
 pub const TETRIS_FLASH_MS: u64 = 2000;
+
+/// How long the new-record celebration throws pieces across the screen, in
+/// milliseconds.
+///
+/// Three seconds, and the length is the point rather than a detail. The player
+/// is sent to the initials screen the instant a run is recognised as a record,
+/// so a celebration that is over in a second is a flash the player spends the
+/// whole time typing through, and one that runs much past this stops being an
+/// event and becomes the wallpaper. Deliberately longer than
+/// [`LEVEL_TRANSITION_MS`] and [`TETRIS_FLASH_MS`]: beating the record outranks
+/// clearing four rows, and it is the one moment in a run with no sting of its
+/// own to mark it.
+pub const HIGH_SCORE_CELEBRATION_MS: u64 = 3000;
 
 /// Default DAS (delayed auto shift) in milliseconds.
 pub const DEFAULT_DAS_MS: u32 = 150;
@@ -1198,6 +1262,63 @@ mod tests {
     fn level_one_is_the_theme_untouched() {
         let base = palette_for(0);
         assert_eq!(stage_palette(&base, 1), base);
+    }
+
+    /// The version the game announces comes from `Cargo.toml`, not from a
+    /// typed string.
+    ///
+    /// This exists because it did not. `Cargo.toml` was bumped to 2.2.0 while
+    /// the window title and the main menu subtitle still said 2.1, both of them
+    /// string literals nobody remembered to edit. Reading the manifest at
+    /// compile time makes that class of drift impossible, and this test fails
+    /// if a future version bump reintroduces a hardcoded number.
+    #[test]
+    fn the_version_shown_in_game_comes_from_the_manifest() {
+        // Read Cargo.toml the way the compiler does, so the assertion is
+        // against the real file rather than a copy of it.
+        let manifest = include_str!("../Cargo.toml");
+        // `version = "x.y.z"` in the `[package]` table. The value is found by
+        // parsing rather than by a hardcoded string so this test keeps
+        // working after the next bump.
+        let declared = manifest
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let rest = line.strip_prefix("version")?.trim_start();
+                let rest = rest.strip_prefix('=')?.trim();
+                Some(rest.trim_matches('"').to_string())
+            })
+            .next()
+            .expect("Cargo.toml should declare a package version");
+
+        assert_eq!(
+            VERSION_LINE,
+            format!("{declared} rust edition"),
+            "the main menu subtitle should be the manifest version"
+        );
+        assert_eq!(
+            WINDOW_TITLE,
+            format!("TetraFusion {declared} rust edition"),
+            "the window title should be the manifest version"
+        );
+        // The original Pygame game is 2.1, and the window title must announce
+        // this port's own version rather than the one being ported.
+        //
+        // Compared as whole versions, not as a substring. `contains("2.1")` was
+        // the wrong test and it broke on 2.2.1: every 2.2.x version has "2.1" in
+        // it, so the guard fired on the port announcing its own version
+        // correctly. That is the failure mode substring checks have, and it only
+        // shows up on a version bump.
+        assert_ne!(
+            declared, ORIGINAL_GAME_VERSION,
+            "the window title announces {ORIGINAL_GAME_VERSION}, which is the version \
+             being ported, not this port's own"
+        );
+        assert_eq!(
+            WINDOW_TITLE,
+            format!("TetraFusion {declared} rust edition"),
+            "the window title should carry this port's version and not the original's"
+        );
     }
 
     /// The morph must not wash a colour out or crush it to black.

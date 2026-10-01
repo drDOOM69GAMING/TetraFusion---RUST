@@ -13,6 +13,7 @@ use raylib::ffi::{Rectangle, Vector2};
 use crate::board::TOTAL_ROWS;
 use crate::config::*;
 use crate::game::{Event, Game, Mode};
+use crate::manual;
 use crate::pieces::{self, Piece, Rotation};
 
 fn rgb(c: [u8; 3]) -> Color {
@@ -203,6 +204,9 @@ pub fn draw_grid_lines(d: &mut RaylibDrawHandle, x: i32, y: i32, w: i32, h: i32,
 /// The image is scaled to fit, centred, and letterboxed with black bars when
 /// the aspect ratios differ. Source height is negative because render textures
 /// are stored upside down relative to ordinary textures.
+///
+/// [`WINDOW_MARGIN`] is carried through the scaling, so the game never sits
+/// flush against the edge of the framebuffer. See [`fit_with_margin`].
 pub fn present(
     d: &mut RaylibDrawHandle,
     target: &RenderTexture2D,
@@ -215,7 +219,7 @@ pub fn present(
         return;
     }
 
-    let dest = fit(viewport, screen);
+    let dest = fit_with_margin(viewport, screen, WINDOW_MARGIN);
     d.draw_texture_pro(
         target,
         Rectangle {
@@ -229,6 +233,35 @@ pub fn present(
         0.0,
         Color::WHITE,
     );
+}
+
+/// [`fit`], but the game is inset by `margin` layout pixels on every side.
+///
+/// `present` scales against the *padded* layout, so the margin grows with the
+/// image instead of being eaten by it. Scaling against the bare layout, which is
+/// what `fit` does, would spend the whole window on the picture and leave
+/// nothing at 1:1: at the native size the game would be flush against the
+/// framebuffer edges, with the playfield floor on the last pixel row.
+///
+/// Returns the rectangle the game itself occupies. The margin is `margin`
+/// pixels at 1:1 and `margin * scale` pixels once the image is scaled up, so
+/// the border is always at least as thick as the un-scaled margin.
+pub fn fit_with_margin(viewport: (i32, i32), screen: (i32, i32), margin: i32) -> Rectangle {
+    let margin = margin.max(0);
+    let padded = (viewport.0 + 2 * margin, viewport.1 + 2 * margin);
+    let boxy = fit(padded, screen);
+    // `fit` degenerates to a zero rect for a degenerate screen; keep that.
+    if boxy.width <= 0.0 || boxy.height <= 0.0 {
+        return boxy;
+    }
+    let scale = boxy.width / padded.0 as f32;
+    let inset = margin as f32 * scale;
+    Rectangle {
+        x: boxy.x + inset,
+        y: boxy.y + inset,
+        width: viewport.0 as f32 * scale,
+        height: viewport.1 as f32 * scale,
+    }
 }
 
 /// Where the game lands inside a `screen`-sized framebuffer: scaled to fit,
@@ -518,6 +551,24 @@ const fn clock_block_bottom() -> i32 {
 const CLOCK_SLACK: i32 = 4;
 const CLOCK_BLOCK_H: i32 = clock_block_bottom() + CLOCK_SLACK;
 
+/// Text size of the standing record row, and the gap from it to the score row.
+///
+/// Named for the same reason as the clock constants: the record is the first
+/// thing in the panel and the score the second, so the only thing keeping them
+/// from being drawn on top of each other is this gap. `HIGH_SCORE_GAP` has to be
+/// at least [`HIGH_SCORE_ROW_SIZE`] for the same reason [`CLOCK_LABEL_GAP`] has to
+/// clear an 18 pt row, and it is asserted that way.
+const HIGH_SCORE_ROW_SIZE: i32 = 18;
+const HIGH_SCORE_GAP: i32 = 24;
+
+/// Gap from the last optional panel row to the HOLD caption.
+///
+/// 60 before the record row existed at the top of the panel, and 36 now. The
+/// difference is exactly [`HIGH_SCORE_GAP`], so the HOLD and NEXT queues stay
+/// where they were instead of being pushed down the screen by a row added above
+/// them.
+const HOLD_ROW_GAP: i32 = 60 - HIGH_SCORE_GAP;
+
 /// `m:ss` from a millisecond count, for the mode clocks.
 ///
 /// Not `{:.1}s`. A sprint finish is the number being raced and a marathon is
@@ -549,6 +600,7 @@ pub fn draw_panel(
     look: crate::skins::Look,
     keep: (f32, f32),
     now_ms: u64,
+    table: &crate::scores::Scores,
 ) {
     let px = SCREEN_WIDTH;
     d.draw_rectangle(px, 0, total_w - px, SCREEN_HEIGHT, Color::new(12, 12, 18, 255));
@@ -560,6 +612,24 @@ pub fn draw_panel(
     );
 
     let mut y = 30;
+    // The mode's standing record, on the first line of the panel and above the
+    // score, so the number the player is chasing is on screen during play.
+    //
+    // It used to be drawn only on the pause and game-over overlays, which meant
+    // the record was invisible for the whole of a run: a player could not see
+    // what they were trying to beat, and could not tell whether the run they had
+    // just finished was going to count. It also explains the initials prompt
+    // being a surprise - the score had been higher than the record on screen for
+    // a minute with nothing to indicate it.
+    text(
+        d,
+        &format!("High: {} ({})", table.get(g.mode).score, table.get(g.mode).name),
+        px + 20,
+        y,
+        HIGH_SCORE_ROW_SIZE,
+        Color::new(150, 200, 255, 255),
+    );
+    y += HIGH_SCORE_GAP;
     text(d, &format!("Score: {}", g.score), px + 20, y, 20, Color::WHITE);
     y += 34;
     text(d, &format!("Level: {}", g.level), px + 20, y, 20, Color::WHITE);
@@ -640,7 +710,13 @@ pub fn draw_panel(
         text(d, "B2B", px + 20, y, 20, Color::new(0, 220, 220, 255));
     }
 
-    y += 60;
+    // 36, not the 60 this used to be, and that is deliberate: the record line
+    // added at the top of the panel pushes everything below it down by
+    // HIGH_SCORE_GAP, and this takes it back out again. The HOLD and NEXT queues
+    // have to stay exactly where they were, because the "TetraFusion!" call-out
+    // is placed against a fixed distance from the bottom of the screen and would
+    // otherwise land on top of the last queued piece.
+    y += HOLD_ROW_GAP;
     text(d, "HOLD", px + 20, y, 16, Color::GRAY);
     y += 12;
     d.draw_rectangle_lines_ex(
@@ -986,7 +1062,7 @@ pub fn draw_menu(d: &mut RaylibDrawHandle, selected: usize, labels: &[String], t
         52,
         Color::new(0, 230, 230, 255),
     );
-    center(d, "2.1 - rust edition", 210, 18, Color::GRAY);
+    center(d, VERSION_LINE, 210, 18, Color::GRAY);
 
     for (i, label) in labels.iter().enumerate() {
         let y = 320 + i as i32 * 56;
@@ -1013,12 +1089,115 @@ pub fn draw_menu(d: &mut RaylibDrawHandle, selected: usize, labels: &[String], t
     );
     center(
         d,
-        "OPTIONS changes the game settings",
+        "MANUAL explains how to play, OPTIONS changes the settings",
         SCREEN_HEIGHT - 110,
         18,
         Color::GRAY,
     );
     center(d, "ESC to quit", SCREEN_HEIGHT - 88, 16, Color::GRAY);
+}
+
+/// The manual screen: one page of the book.
+///
+/// `index` is the page to print, not the page state: everything else about
+/// paging is [`crate::manual`], which is where it can be tested without a
+/// window. The two column lines are laid out from a measurement of the widest
+/// label actually on this page, so a page of short keys and a page of long
+/// ones each sit centred rather than hanging off the right edge.
+pub fn draw_manual(d: &mut RaylibDrawHandle, index: usize, t: f32) {
+    let page = manual::page(index);
+
+    center(
+        d,
+        page.name,
+        56,
+        40,
+        Color::new(255, 210, 60, 255),
+    );
+    center(
+        d,
+        &manual::page_of(index),
+        104,
+        18,
+        Color::new(150, 200, 255, 255),
+    );
+
+    // A sheet of paper behind the text, sized from the page's own last line
+    // rather than a fixed box, so a page with three lines is a short sheet and
+    // a full one is a tall sheet. Drawn at a low alpha: it has to separate the
+    // text from the animated background without hiding it.
+    let top = manual::BODY_TOP - manual::LINE_PITCH / 2;
+    let bottom = manual::last_line_y(page) + manual::LINE_PITCH;
+    d.draw_rectangle(8, top, SCREEN_WIDTH - 16, bottom - top, Color::new(0, 0, 0, 170));
+    d.draw_rectangle_lines(
+        8,
+        top,
+        SCREEN_WIDTH - 16,
+        bottom - top,
+        Color::new(255, 210, 60, 70),
+    );
+
+    // One size for the whole two column block, and the column that goes with
+    // it. The block is measured as a block rather than each label on its own,
+    // because it is the pair that has to fit: a single long key name must not
+    // push its own explanation off the right edge. The tests keep the printed
+    // content inside the screen, and this keeps it on screen even if some
+    // future page forgets to. The shared borrow is scoped to this block
+    // because the loop below needs `d` mutably again.
+    let (pair_size, column) = {
+        let probe = &*d;
+        let size = fit_size(manual::BODY_SIZE, |at| {
+            manual::block_width(|t| probe.measure_text(t, at), page)
+        });
+        (size, manual::description_column(|t| probe.measure_text(t, size), page))
+    };
+
+    // Walk a running y rather than indexing by line: a mode prints two rows, so
+    // the next line's y depends on the lines before it. The cursor is the same
+    // arithmetic `manual::total_rows` is tested against.
+    let mut y = manual::BODY_TOP;
+    for (i, line) in page.lines.iter().enumerate() {
+        match *line {
+            manual::Line::Head(s) => {
+                // A one pixel breath on the first heading, the same bob the
+                // menus use, so the book feels like part of the same game.
+                let bob = if i == 0 { ((t * 2.0).sin() * 2.0) as i32 } else { 0 };
+                center(d, s, y + bob, manual::HEAD_SIZE, Color::new(255, 210, 60, 255));
+            }
+            manual::Line::Body(s) => {
+                center(d, s, y, manual::BODY_SIZE, Color::GRAY);
+            }
+            manual::Line::Pair(label, what) => {
+                text(d, label, manual::LABEL_LEFT, y, pair_size, Color::new(0, 230, 230, 255));
+                text(d, what, column, y, pair_size, Color::GRAY);
+            }
+            // Name over rule, the way the main menu shows a mode: the name in
+            // the game's own cyan so it reads as a heading, the rule centred
+            // under it in grey, both measured so neither clips.
+            manual::Line::Mode(mode) => {
+                center(d, mode.label(), y, manual::HEAD_SIZE, Color::new(0, 230, 230, 255));
+                // Measured separately: the two calls both want `d`, and the
+                // size has to be settled before the draw it is the size of.
+                let size = fit_one(d, mode.blurb(), manual::BODY_SIZE);
+                center(d, mode.blurb(), y + manual::LINE_PITCH, size, Color::GRAY);
+            }
+            manual::Line::Gap => {}
+        }
+        y += line.rows() * manual::LINE_PITCH;
+    }
+    debug_assert_eq!(
+        y,
+        manual::last_line_y(page),
+        "the drawn cursor and the tested page height disagree"
+    );
+
+    center(
+        d,
+        manual::FOOTER,
+        manual::FOOTER_TOP,
+        18,
+        Color::GRAY,
+    );
 }
 
 /// Where the options rows start and how far apart they sit.
@@ -1341,16 +1520,18 @@ mod tests {
     /// preview off the bottom of the screen.
     #[test]
     fn the_tallest_panel_still_fits_on_screen() {
-        // Reproduces draw_panel's vertical walk: Score, Level, Lines, Pieces, the
-        // clock block, the optional combo and B2B rows, HOLD, then five previews.
+        // Reproduces draw_panel's vertical walk: the record, Score, Level, Lines,
+        // Pieces, the clock block, the optional combo and B2B rows, HOLD, then
+        // five previews.
         let mut y = 30;
+        y += HIGH_SCORE_GAP; // Score
         y += 34; // Level
         y += 30; // Lines
         y += 26; // Pieces
         y += CLOCK_LABEL_GAP + CLOCK_BLOCK_H; // clock block
         y += 34; // combo
         y += 28; // B2B
-        y += 60; // HOLD label
+        y += HOLD_ROW_GAP; // HOLD label
         y += 12 + 64; // hold box
         y += 110; // NEXT label
         y += 12; // first preview
@@ -1364,6 +1545,30 @@ mod tests {
         );
     }
 
+    /// Adding the record row must not have moved the rest of the panel down.
+    ///
+    /// The HOLD and NEXT queues are drawn at a fixed distance from the rows above
+    /// them, and the "TetraFusion!" call-out is positioned against a fixed
+    /// distance from the bottom of the screen. A row inserted at the top of the
+    /// panel pushes both of those down by its own height, which would land the
+    /// call-out on top of the last queued piece. `HOLD_ROW_GAP` takes that height
+    /// back out; this is what holds it to doing so.
+    #[test]
+    fn the_record_row_does_not_push_the_queues_down() {
+        assert_eq!(
+            HOLD_ROW_GAP + HIGH_SCORE_GAP,
+            60,
+            "the record row and the reduced HOLD gap have to cancel out, or every \
+             panel row below the score has moved"
+        );
+        // The record and the score are adjacent rows, so the gap between them has
+        // to clear the record's own text or the two are drawn on top of each other.
+        assert!(
+            HIGH_SCORE_GAP >= HIGH_SCORE_ROW_SIZE,
+            "the score starts only {HIGH_SCORE_GAP} px below a {HIGH_SCORE_ROW_SIZE} px record row"
+        );
+    }
+
     /// Without the clock the panel is shorter, so Marathon's panel is the one with
     /// the most room. Both timed modes draw the clock *and* are the ones a player
     /// watches most closely, so the slack is where the clock has to fit - which is
@@ -1372,10 +1577,10 @@ mod tests {
     fn the_panel_without_a_clock_leaves_more_room_than_the_one_with() {
         fn stack(clock: i32) -> i32 {
             let mut y = 30;
-            y += 34 + 30 + 26; // Level, Lines, Pieces
+            y += HIGH_SCORE_GAP + 34 + 30 + 26; // Score, Level, Lines, Pieces
             y += if clock == 0 { 0i32 } else { CLOCK_LABEL_GAP } + clock;
             y += 34 + 28; // combo, B2B
-            y += 60 + 12 + 64; // HOLD
+            y += HOLD_ROW_GAP + 12 + 64; // HOLD
             y += 110 + 12 + 62 * 5; // NEXT and five previews
             y
         }
@@ -1475,6 +1680,88 @@ mod tests {
     fn the_native_window_size_needs_no_letterboxing() {
         let r = fit(VIEW, VIEW);
         assert_eq!((r.x, r.y, r.width, r.height), (0.0, 0.0, 819.0, 930.0));
+    }
+
+    /// The window the game opens at is the layout plus a margin on every side,
+    /// and at that size the game must stay exactly 1:1 and sit `WINDOW_MARGIN`
+    /// pixels in from each edge.
+    ///
+    /// This is the cut-off report: sized to the bare layout the playfield is
+    /// flush against the framebuffer and its floor lands on the last pixel row,
+    /// so the window's own title bar and borders overlap the board.
+    #[test]
+    fn the_native_window_leaves_a_clear_border_on_every_side() {
+        let padded = (
+            VIEW.0 + 2 * WINDOW_MARGIN,
+            VIEW.1 + 2 * WINDOW_MARGIN,
+        );
+        let r = fit_with_margin(VIEW, padded, WINDOW_MARGIN);
+        assert_eq!(
+            (r.x, r.y, r.width, r.height),
+            (
+                WINDOW_MARGIN as f32,
+                WINDOW_MARGIN as f32,
+                VIEW.0 as f32,
+                VIEW.1 as f32
+            ),
+            "at 1:1 the game must keep its own pixel size, inset by the margin"
+        );
+    }
+
+    /// The margin has to survive scaling up, which is what `fit` alone does not
+    /// do: it spends the entire framebuffer on the picture and returns a
+    /// zero-pixel border.
+    #[test]
+    fn the_border_survives_being_scaled_up() {
+        let m = WINDOW_MARGIN as f32;
+        let screen = (3840, 2160);
+        let r = fit_with_margin(VIEW, screen, WINDOW_MARGIN);
+        assert!(r.x >= m, "left edge {r:?} is inside the margin");
+        assert!(r.y >= m, "top edge {r:?} is inside the margin");
+        assert!(
+            screen.0 as f32 - (r.x + r.width) >= m,
+            "right edge {r:?} is inside the margin"
+        );
+        assert!(
+            screen.1 as f32 - (r.y + r.height) >= m,
+            "bottom edge {r:?} is inside the margin"
+        );
+    }
+
+    /// The whole padded image, margin included, still fits the framebuffer:
+    /// the border is taken out of the scale, never added on top of it.
+    #[test]
+    fn the_padded_image_never_overflows_the_framebuffer() {
+        for screen in [(819, 930), (867, 978), (1920, 1080), (600, 1400), (400, 400)] {
+            let r = fit_with_margin(VIEW, screen, WINDOW_MARGIN);
+            assert!(
+                r.x >= 0.0 && r.y >= 0.0 && r.x + r.width <= screen.0 as f32 + 0.01
+                    && r.y + r.height <= screen.1 as f32 + 0.01,
+                "{screen:?} clipped the game: {r:?}"
+            );
+        }
+    }
+
+    /// A window too small to hold the margin still shows the game rather than
+    /// collapsing it.
+    #[test]
+    fn a_margin_larger_than_the_window_shrinks_instead_of_disappearing() {
+        let r = fit_with_margin(VIEW, (200, 200), WINDOW_MARGIN);
+        assert!(r.width > 0.0 && r.height > 0.0, "game vanished: {r:?}");
+        assert!(r.x >= 0.0 && r.y >= 0.0 && r.x + r.width <= 200.0 + 0.01);
+    }
+
+    /// A negative margin would push the image off screen rather than inset it.
+    #[test]
+    fn a_negative_margin_is_treated_as_no_margin() {
+        let padded = (VIEW.0, VIEW.1);
+        let neg = fit_with_margin(VIEW, padded, -50);
+        let zero = fit_with_margin(VIEW, padded, 0);
+        assert_eq!(
+            (neg.x, neg.y, neg.width, neg.height),
+            (zero.x, zero.y, zero.width, zero.height),
+            "a negative margin must clamp to zero"
+        );
     }
 
     /// A fullscreen 16:9 display is far wider than the game's tall layout, so

@@ -61,7 +61,7 @@ pub struct Settings {
     /// Whether the playfield lattice is drawn at all (original: `grid_lines`).
     #[serde(default = "default_true")]
     pub grid_lines: bool,
-    /// Lattice alpha on the original's 0-255 scale (default 255). Original:
+    /// Lattice alpha on the original's 0-255 scale (default 64). Original:
     /// `grid_opacity`, stepped by 64 per press and wrapping 255 -> 0.
     #[serde(default = "default_grid_opacity")]
     pub grid_opacity: u8,
@@ -128,8 +128,12 @@ fn default_ghost_opacity() -> u8 {
 fn default_true() -> bool {
     true
 }
+/// A fresh install starts at 64, one of the four stops on the 0-255 lattice
+/// scale, so the grid is a faint guide rather than a bright cage drawn over
+/// every block. The Options row still steps by 64 per press, so 64 sits on the
+/// same ladder as every other value it can reach.
 fn default_grid_opacity() -> u8 {
-    255
+    64
 }
 
 /// The remappable actions, in the original's menu order.
@@ -313,7 +317,7 @@ impl Default for Settings {
             screen_shake: true,
             backgrounds_enabled: true,
             grid_lines: true,
-            grid_opacity: 255,
+            grid_opacity: default_grid_opacity(),
             music_enabled: true,
             use_custom_music: false,
             music_directory: String::new(),
@@ -489,11 +493,33 @@ mod tests {
 
     // --- grid -----------------------------------------------------------
 
+    /// A fresh install draws the grid faintly, at 64 rather than 255, so it
+    /// reads as a guide under the stack instead of a bright cage on top of it.
+    /// The Options row steps in 64s, so 64 is one rung up from off and the
+    /// player can still reach 255, 192, 128, 0 in both directions.
     #[test]
-    fn the_grid_defaults_to_fully_visible_and_can_be_turned_off() {
+    fn the_grid_defaults_to_a_faint_line_at_64_and_can_be_turned_off() {
         let s = Settings::default();
         assert!(s.grid_lines);
-        assert_eq!(s.grid_opacity, 255);
+        assert_eq!(s.grid_opacity, 64);
+        assert_eq!(s.grid_opacity % 64, 0, "the default should sit on the 64 step ladder");
+    }
+
+    /// A `settings.json` written before the default changed must not have its
+    /// grid forced to 64 on load: the file states 255, and the file wins.
+    #[test]
+    fn a_stored_grid_opacity_is_not_overwritten_by_the_new_default() {
+        let json = r#"{"grid_lines":true,"grid_opacity":255}"#;
+        let loaded: Settings = serde_json::from_str(json).expect("stored settings should parse");
+        assert_eq!(loaded.grid_opacity, 255);
+    }
+
+    /// A stored file with no `grid_opacity` at all takes the new default.
+    #[test]
+    fn a_missing_grid_opacity_falls_back_to_the_new_default() {
+        let json = r#"{"grid_lines":true}"#;
+        let loaded: Settings = serde_json::from_str(json).expect("stored settings should parse");
+        assert_eq!(loaded.grid_opacity, 64);
     }
 
     #[test]

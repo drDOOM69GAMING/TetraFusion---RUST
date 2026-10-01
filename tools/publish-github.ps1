@@ -1,16 +1,27 @@
 $ErrorActionPreference = "Stop"
 
-# Publishes the crate to GitHub as ONE commit with a real tree.
+# Publishes the crate to GitHub as ONE commit, parented to the current main.
 #
-# The earlier attempt uploaded every file through the contents API, which is one
-# commit *per file* - around a hundred commits of "Add src/board.rs", and a
-# history that says nothing. This does it properly instead: a single tree
-# object, a single root commit, and the branch ref pointed at it.
+# Two things this gets right that a contents-API upload does not:
+#
+#   - One tree, one commit, not one commit per file. Uploading through
+#     /contents/ produces a hundred commits of "Add src/board.rs" and a history
+#     that says nothing.
+#   - History is extended, not replaced. An earlier version of this script
+#     created a parentless root commit and force-pushed over main. That is
+#     destructive and there was no reason for it: this repo is public and one
+#     real commit already exists, so new work goes on top of it and `git log`
+#     still means something. Only the tag and release move forward.
+#
+# Deletions are explicit. Building a tree with base_tree inherits every path the
+# entries do not mention, so a file removed locally is still on the branch
+# unless it is listed with a null sha. That is how examples/ went away.
 
 $token = $env:GH_TOKEN
 $owner = "drDOOM69GAMING"
 $repo = "TetraFusion---RUST"
 $root = "C:\Users\amduser\Documents\Default Project\tetrafusion-rs"
+$api = "https://api.github.com/repos/$owner/$repo"
 
 $headers = @{
     Authorization = "Bearer $token"
@@ -25,11 +36,15 @@ function Post-Json($uri, $obj, $h) {
     Invoke-RestMethod -Uri $uri -Headers $h -Method Post -Body $bytes -ContentType "application/json"
 }
 
-# Everything that is source, not build output or local state.
-$files = Get-ChildItem "$root\src","$root\tests","$root\examples","$root\tools","$root\assets" -Recurse -File |
-    Where-Object { $_.Extension -ne ".md" -or $_.DirectoryName -notmatch "assets" }
+# Build-needed files only. No target/, no captures, no local helper scripts:
+# the point of the tree is that it is what someone needs to build the game.
+$files = Get-ChildItem "$root\src","$root\tests","$root\tools","$root\assets" -Recurse -File |
+    Where-Object { $_.Extension -ne ".md" -or $_.DirectoryName -notmatch "assets" } |
+    Where-Object { $_.Name -notin @("keys.ps1", "shot.ps1", "vk.ps1") }
 $files += Get-Item "$root\Cargo.toml","$root\Cargo.lock","$root\build.rs","$root\README.md","$root\LICENSE","$root\THIRD-PARTY-LICENSES.md","$root\.gitignore"
 $files = $files | Sort-Object FullName -Unique
+
+
 
 # A file is "binary" if it is not valid UTF-8 text. Decided by a round trip
 # rather than by extension, so nothing is silently mangled by being guessed wrong.
@@ -51,66 +66,84 @@ foreach ($f in $files) {
         # Binary content goes up base64-encoded, as its own blob, so the tree
         # request stays small.
         $content = [Convert]::ToBase64String([IO.File]::ReadAllBytes($f.FullName))
-        $blob = Post-Json "https://api.github.com/repos/$owner/$repo/git/blobs" @{
-            content = $content; encoding = "base64"
-        } $headers
-        $entries += @{
-            path = $rel; mode = "100644"; type = "blob"; sha = $blob.sha
-        }
+        $blob = Post-Json "$api/git/blobs" @{ content = $content; encoding = "base64" } $headers
+        $entries += @{ path = $rel; mode = "100644"; type = "blob"; sha = $blob.sha }
         $binCount++
-        Write-Host "  blob  $rel ($([math]::Round($f.Length/1KB)) KB)"
     } else {
-        $text = [IO.File]::ReadAllText($f.FullName)
         $entries += @{
-            path = $rel; mode = "100644"; type = "blob"; content = $text
+            path = $rel; mode = "100644"; type = "blob"
+            content = [IO.File]::ReadAllText($f.FullName)
         }
         $txtCount++
     }
 }
-
 Write-Host "$txtCount text file(s) inline, $binCount blob(s), $([math]::Round($totalBytes/1MB,1)) MB total"
 
-$tree = Post-Json "https://api.github.com/repos/$owner/$repo/git/trees" @{ tree = $entries } $headers
+# Parent on whatever main is now, so this is an addition to history.
+# Parent on whatever main is now, so this is an addition to history.
+$ref = Invoke-RestMethod -Uri "$api/git/refs/heads/main" -Headers $headers
+$baseCommit = Invoke-RestMethod -Uri "$api/git/commits/$($ref.object.sha)" -Headers $headers
+Write-Host "parent $($baseCommit.sha)"
+
+# No base_tree. The entry list is the complete set of files this repo should
+# contain, and a tree built from it replaces the tree wholesale, so a path that
+# is no longer listed is simply absent - which is how examples/ went away without
+# a deletion entry.
+#
+# An earlier attempt passed base_tree and a deletion entry with a null sha.
+# ConvertTo-Json drops null keys entirely, so that entry went over the wire as a
+# blob with neither sha nor content, and the API rejected the whole tree with a
+# 422 GitRPC::BadObjectState that says nothing about the real cause. Not using
+# base_tree is both simpler and one request shorter.
+$tree = Post-Json "$api/git/trees" @{ tree = $entries } $headers
 Write-Host "tree $($tree.sha)"
 
-$commit = Post-Json "https://api.github.com/repos/$owner/$repo/git/commits" @{
-    message = "TetraFusion 2.2.0 in Rust with raylib-rs 5.5
+$message = @"
+TetraFusion 2.2.1: music that keeps up with gravity, visible per-level
+backgrounds, and a celebration for a new high score
 
-Faithful port of drDOOM69GAMING's Pygame original, with the deliberate
-improvements listed in the README: all five modes behave as their labels
-state, per level palettes with a Traditional option, twelve piece skins,
-gravity ramping to 20G by level 20, a visible clock where a mode has a time,
-three letter high score initials per mode, full controller remapping, and an
-OS folder dialog for custom music on every platform.
+Three changes, and two of them start from a report that something did not
+work.
 
-Scoring follows the Tetris Guideline: the 100/300/500/800 line table, a
-separate spin table with full and mini T spins, back to back as a real 1.5x
-on the clear, combos, and perfect clears. A T spin requires the piece to
-have been rotated last, so a straight drop into a three corner pocket no
-longer scores as one.
+The backgrounds were already changing per level and already drawn across the
+full window width. Measuring them showed why nobody noticed. A flat 39% black
+overlay sat over the whole screen, which left every one of the fifteen bundled
+photos between 14% and 21% grey. A photo that starts nearly black, dimmed into
+being invisible, replaced by a different photo that is also nearly black, is not
+a change you can see. The dim is now two values: unchanged behind the well,
+where blocks and the ghost piece need the contrast, and much lighter behind the
+side panel, where there is nothing to read and where the high score, score and
+level live. The same photos now land between 20% and 30% grey there. Both bounds
+are pinned by tests that measure the embedded photos rather than the constants.
 
-The executable is self-contained. The fifteen background photos and all five
-sounds are include_bytes!'d into it and the icon is compiled into its
-resource section, so a copy of tetrafusion.exe on its own is the whole game.
-tests/portable.rs runs that copy out of an empty directory to prove it.
+The music tempo ramp is retied to gravity rather than to the level number. The
+old ramp stepped evenly, which was wrong without being obviously wrong, because
+the game does not speed up evenly: falling speed doubles from level 1 to level 2
+and then flattens towards its floor. The ramp is now a power curve of the same
+gravity value, so it has the same shape, capped above anything gravity reaches
+inside its own range so the cap never binds while the game is still climbing.
 
-Settings and high scores live in the per user app data folder, not beside
-the executable.
+A new high score now throws tetromino pieces across the whole screen for three
+seconds. Each shard is a real piece from the shape tables rather than a square,
+thrown from the middle in every direction, spinning and falling and fading in
+and out. It covers the side panel as well as the well, because a record happened
+to the run rather than to a piece, and it draws behind the initials prompt so
+your three letters stay readable.
 
-435 tests, no warnings on a release build."
+495 tests, no warnings on a release build.
+"@
+
+$commit = Post-Json "$api/git/commits" @{
+    message = $message
     tree = $tree.sha
-    parents = @()
+    parents = @($baseCommit.sha)
 } $headers
 Write-Host "commit $($commit.sha)"
 
-# Point the default branch at it. The old contents-API history is replaced; it
-# was one commit per file and carried no information.
-#
-# The ref already exists, so this is a PATCH, not a POST. POST fails with
-# 422 "Reference already exists" and leaves the new commit orphaned.
-$sha = $commit.sha
-$body = @{ sha = $sha; force = $true } | ConvertTo-Json -Compress
-$ref = Invoke-RestMethod -Uri "https://api.github.com/repos/$owner/$repo/git/refs/heads/main" -Headers $headers -Method Patch -Body $body -ContentType "application/json"
-Write-Host "main -> $($ref.object.sha)"
+# A fast-forward, not a force: if the branch has moved since the parent was
+# read, this fails rather than silently discarding whatever landed in between.
+$body = @{ sha = $commit.sha; force = $false } | ConvertTo-Json -Compress
+$updated = Invoke-RestMethod -Uri "$api/git/refs/heads/main" -Headers $headers -Method Patch -Body $body -ContentType "application/json"
+Write-Host "main -> $($updated.object.sha)"
 
 $commit | Select-Object sha, html_url | Format-List

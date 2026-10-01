@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use raylib::audio::{Music, RaylibAudio, Sound};
 
 use crate::assets;
+use crate::config::gravity_g;
 use crate::game::{Event, Game};
 use crate::music_dir::collect_tracks;
 use crate::settings::Settings;
@@ -182,6 +183,143 @@ enum MusicAction {
     Start,
 }
 
+/// How much faster the bundled track plays for each level reached.
+///
+/// Level one is the track at its normal tempo, and every level after that adds
+/// this much speed. The count is [`config::gravity_g`] rather than the raw
+/// level number, because gravity is the thing that is actually getting faster:
+/// it is one G more per level, so one G is one step of music. Tying the two
+/// together is what makes the music track the game rather than merely climb.
+///
+/// An amount, not a factor, and the reason is the shape of the ladder. Speed is
+/// heard as a ratio, so a factor gives every level the same size of jump - but
+/// only if the factor is small enough to still be music at level twenty, and at
+/// that size it is inaudible at level two, which is where a player spends most
+/// of a run. An amount shrinks in ratio terms as the ramp climbs (this is a shade
+/// under two and a half semitones at level two and about one at level twenty)
+/// but stays a real step the whole way, and staying audibly a step is the
+/// property that matters: the level change has to be heard.
+///
+/// The ramp before this was a 4% factor per level, about 69 cents. Gravity
+/// doubles from level one to level two, so 69 cents is nowhere near the jump the
+/// player just felt in the pieces. Levels arrive every [`config::LINES_PER_LEVEL`]
+/// lines, so a step arrived far too rarely and far too small, and the track could
+/// climb from level one to the level where gravity stops without the player
+/// noticing a single step.
+pub const MUSIC_SPEED_STEP: f32 = 0.30;
+
+/// How the per-G step is bent as the ramp climbs.
+///
+/// Under 1, so the ramp's *shape* matches gravity's without matching its
+/// magnitude. Gravity goes 1, 2, 3, 4... G, so the game itself accelerates
+/// fastest at the bottom of the range; this keeps the music doing the same
+/// thing, moving decisively early and easing off later.
+///
+/// A straight line per G - which is what the previous 0.15 step was - has the
+/// opposite shape. It moved 15% at level 2 and the same 15% at level 19, so it
+/// lagged the game's own acceleration badly at exactly the levels where the
+/// player can feel the game speeding up, and kept pushing at levels where the
+/// game was barely changing.
+pub const MUSIC_SPEED_CURVE: f32 = 0.765;
+
+/// The ceiling on the speed multiplier.
+///
+/// A marathon run has no end, so level 100 is reachable and would otherwise ask
+/// for a hundred-fold speed, which is a chirp rather than music.
+///
+/// This is 4.0 rather than the 2.5 it used to be, and that came from a bad call.
+/// At 2.5 the ramp hit the ceiling at level 11, which left levels 11 to 20 - nine
+/// levels in which the pieces visibly speed up and the track does not move at all.
+/// A player in that stretch hears a song that changed once and stopped, which is
+/// the opposite of tracking the game. 4.0 puts the ceiling past level 20, so the
+/// ramp never flattens anywhere gravity is still climbing.
+///
+/// The price is that the late game runs at up to 3.85 times speed, which is high
+/// and pitchy. That is a deliberate trade and the alternative was worse: nine
+/// levels of the hardest part of the game with a silent ramp.
+pub const MUSIC_SPEED_MAX: f32 = 4.0;
+
+/// The first level at which [`MUSIC_SPEED_MAX`] actually starts capping the ramp.
+///
+/// Worked out from the two constants above rather than written down by hand, so
+/// that changing either one moves it instead of quietly leaving a wrong number in
+/// a comment and a test. Only the tests need to know it: the driver itself has no
+/// reason to ask where the cap is, because it compares the wanted speed against
+/// the applied one and a capped level simply stops differing.
+#[cfg(test)]
+pub fn music_ceiling_level() -> i32 {
+    // Searched rather than solved. The ramp is a power curve, so there is no
+    // expression to invert: `(MAX - 1) / STEP` was the answer for the old linear
+    // ramp and reported the cap at level 11 when the curve actually clears it. A
+    // search cannot be wrong about its own shape, and the range is bounded by
+    // gravity's own ceiling, so this stays a handful of iterations.
+    let mut level = 1;
+    while music_speed_for_level(level + 1) < MUSIC_SPEED_MAX - 1e-4 {
+        level += 1;
+        if level > 1000 {
+            // Unreachable while the ramp is bounded, since `gravity_g` clamps.
+            // Written as a literal rather than as `MAX_GRAVITY` on purpose: the
+            // search has to be able to run past gravity's ceiling to find where
+            // the cap actually lands, so this bounds the search rather than
+            // second-guessing what the ramp should do.
+            break;
+        }
+    }
+    level + 1
+}
+
+/// A cached speed that cannot be a real speed, meaning "nothing has been pushed
+/// to the stream yet, so push regardless".
+const UNSET_SPEED: f32 = -1.0;
+
+/// The playback speed the bundled track should run at for a given level.
+///
+/// Deliberately a pure function of the level so the ramp is testable without an
+/// audio device, and so the value is a function of the level rather than of how
+/// the level was reached: starting a Master run at level 15 has to sound like
+/// level 15, not like level 1 played 14 times.
+pub fn music_speed_for_level(level: i32) -> f32 {
+    // Driven by gravity, so the music and the pieces climb the same ladder and
+    // there is one number to change if either is retuned. `gravity_g` clamps at
+    // the gravity ceiling, so level 1000 asks for the level 20 speed rather than
+    // for something enormous.
+    let g = (gravity_g(level) - 1) as f32;
+    (1.0 + g.powf(MUSIC_SPEED_CURVE) * MUSIC_SPEED_STEP).min(MUSIC_SPEED_MAX)
+}
+
+/// What to hand raylib so the stream ends up running at `want`.
+///
+/// raylib's `SetMusicPitch` does not set a speed, it scales one. `SetAudioBufferPitch`
+/// divides the converter's *current* output sample rate by whatever value it is given
+/// and writes the quotient back, so two calls multiply instead of the second
+/// replacing the first. Sending the level's speed directly therefore drifts further
+/// from the intended tempo the longer a run lasts, and the level can no longer be
+/// re-derived from what was asked for once the drift has happened.
+///
+/// Dividing the target by what has already been applied makes the accumulated
+/// product land exactly on `want`, and makes the stream self correcting: every level
+/// re-derives the rate from the intended speed rather than from a running total.
+///
+/// `applied` is [`UNSET_SPEED`] before anything has been pushed. That is treated as a
+/// rate of 1.0, which is where a freshly loaded stream starts, so the first push is
+/// the whole speed.
+pub fn pitch_step(want: f32, applied: f32) -> f32 {
+    let base = if applied > 0.0 { applied } else { 1.0 };
+    want / base
+}
+
+/// The value to push for a level, or `None` when the level has not changed.
+///
+/// Split out of [`Audio::set_level_pitch`] so the choice of *what* to push is
+/// testable without an audio device. The `None` case is what keeps
+/// `SetMusicPitch` off the per-frame path.
+pub fn next_pitch(want: f32, applied: f32) -> Option<f32> {
+    if (want - applied).abs() < f32::EPSILON {
+        return None;
+    }
+    Some(pitch_step(want, applied))
+}
+
 /// Decide this frame's music action from what the driver can observe.
 fn music_action(playlist_empty: bool, playing: bool, track_armed: bool) -> MusicAction {
     if playlist_empty {
@@ -244,6 +382,13 @@ pub struct Audio<'a> {
     /// True while a custom track is loaded in music, so falling back to the
     /// bundled track knows whether it actually has to reload it.
     playing_custom: bool,
+    /// The speed the bundled track was last told to play at, so the value is
+    /// only pushed when it actually changes.
+    ///
+    /// `SetMusicPitch` has to be applied to the same `Music` the next level is
+    /// going to play; custom tracks are never pitched, so this only tracks the
+    /// bundled one.
+    applied_speed: f32,
 }
 
 impl<'a> Audio<'a> {
@@ -269,6 +414,9 @@ impl<'a> Audio<'a> {
             track: 0,
             track_armed: false,
             playing_custom: false,
+            // The stream has not been pitched yet, so the first level change
+            // is always pushed.
+            applied_speed: UNSET_SPEED,
         };
         audio.apply_music_settings(settings);
         if audio.music.is_none()
@@ -334,6 +482,11 @@ impl<'a> Audio<'a> {
         // stream is still reading.
         let music = try_music(self.device, &mut self.music_bytes);
         self.music = music;
+        // A freshly loaded stream starts at pitch 1.0 whatever the level is, so
+        // the cached value is dropped to force the ramp to be re-applied. Left
+        // stale it would match a level that happens to want 1.0 and the track
+        // would quietly stay slow.
+        self.applied_speed = UNSET_SPEED;
     }
 
     /// What a custom playlist is currently doing, for the Options screen.
@@ -437,6 +590,9 @@ impl<'a> Audio<'a> {
     /// game-over screen is up; it reacts to this frame's events and the
     /// state of the stack.
     pub fn update(&mut self, game: Option<&Game>, over: bool) {
+        // The ramp is driven by the level, so it moves only while a run is
+        // live, and it is applied before the stream is updated.
+        self.set_level_pitch(game.map(|g| g.level));
         self.keep_music_playing(over);
 
         if over {
@@ -487,6 +643,47 @@ impl<'a> Audio<'a> {
                 s.stop();
             }
             self.heartbeat_playing = false;
+        }
+    }
+
+    /// Speed the bundled track up as the level climbs, and put it back to
+    /// normal speed whenever the bundled track is the one playing.
+    ///
+    /// Custom music is deliberately never pitched. The player chose those
+    /// files; speeding them up with the level would quietly alter music they
+    /// picked to hear as written, and a track that is 60% faster is a
+    /// different recording. So the ramp is scoped to the game's own track.
+    ///
+    /// `None` (no live run) resets to 1.0, which is what the menus want.
+    fn set_level_pitch(&mut self, level: Option<i32>) {
+        if self.playing_custom {
+            return;
+        }
+        let want = match level {
+            Some(level) => music_speed_for_level(level),
+            None => 1.0,
+        };
+        // Comparing before writing keeps this off the hot path: at 60 fps
+        // `SetMusicPitch` would otherwise be called every frame of a level the
+        // player is sitting still on.
+        if (want - self.applied_speed).abs() < f32::EPSILON {
+            return;
+        }
+        let Some(step) = next_pitch(want, self.applied_speed) else {
+            return;
+        };
+        // raylib's `SetMusicPitch`; 1.0 is base level. Changing this while
+        // the stream is playing is safe: it takes effect on the next
+        // `UpdateMusicStream`, which is the very next thing the driver does.
+        //
+        // `applied_speed` is only recorded once the value has actually been
+        // pushed. Recording it either way meant that a frame with no stream
+        // loaded cached a speed that had never reached the audio device, and a
+        // stream that appeared later would sit at 1.0 forever because the cached
+        // value matched the level and nothing pushed again.
+        if let Some(m) = &self.music {
+            m.set_pitch(step);
+            self.applied_speed = want;
         }
     }
 
@@ -542,7 +739,321 @@ impl<'a> Audio<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{music_action, next_track, MusicAction};
+    use super::{
+        music_action, music_ceiling_level, music_speed_for_level, next_pitch, next_track,
+        MusicAction, MUSIC_SPEED_MAX, UNSET_SPEED,
+    };
+    // The parent imports `gravity_g` by name but not the module, and `use
+    // super::...` above lists names one by one. Named here so the tests can ask
+    // where gravity stops instead of hardcoding 20 and drifting from it.
+    use crate::config;
+
+    /// raylib does not treat a pitch as an absolute speed.
+    ///
+    /// `SetMusicPitch` calls `SetAudioBufferPitch`, which divides the converter's
+    /// *current* output sample rate by whatever it is handed and writes the result
+    /// back. Successive calls therefore multiply rather than replace. This models
+    /// that so the driver's arithmetic can be checked against it without an audio
+    /// device.
+    fn rate_after(steps: &[f32]) -> f32 {
+        steps.iter().product()
+    }
+
+    /// Handing raylib the level's speed directly does not produce the level's
+    /// speed; it runs away from it.
+    ///
+    /// This is the bug the ratio in [`next_pitch`] exists to prevent, kept as a
+    /// test so the arithmetic stays visible: at the levels below, sending absolute
+    /// speeds leaves the stream running at more than double what level 20 asks
+    /// for, because every level multiplies the one before it.
+    #[test]
+    fn absolute_pitches_compound_which_is_why_the_driver_sends_a_ratio() {
+        let levels = [1, 2, 3, 5, 8, 12, 20];
+        let naive: Vec<f32> = levels.iter().map(|&l| music_speed_for_level(l)).collect();
+        let wanted = music_speed_for_level(*levels.last().unwrap());
+        assert!(
+            (rate_after(&naive) - wanted).abs() > 0.5,
+            "raylib's own arithmetic says sending absolute speeds compounds, but \
+             the naive product {} came out near the wanted {wanted}",
+            rate_after(&naive)
+        );
+    }
+
+    /// Walking up through levels, the speed the stream actually ends up running at
+    /// is the speed the current level asks for.
+    ///
+    /// This drives the same [`next_pitch`] the driver uses and replays raylib's
+    /// multiplication, so it covers the value production hands over rather than a
+    /// restatement of the formula.
+    #[test]
+    fn the_stream_ends_up_running_at_the_speed_the_level_asks_for() {
+        let levels = [1, 2, 3, 5, 8, 12, 20, 30];
+        let mut applied = UNSET_SPEED;
+        let mut pushed: Vec<f32> = Vec::new();
+        for &level in &levels {
+            let want = music_speed_for_level(level);
+            let Some(step) = next_pitch(want, applied) else {
+                continue;
+            };
+            pushed.push(step);
+            applied = want;
+            let running = rate_after(&pushed);
+            assert!(
+                (running - want).abs() < 1e-3,
+                "at level {level} the stream was running at {running} instead of {want}"
+            );
+        }
+    }
+
+    /// Sitting on one level must not push a pitch every frame.
+    #[test]
+    fn an_unchanged_level_pushes_nothing() {
+        let want = music_speed_for_level(7);
+        assert_eq!(next_pitch(want, want), None);
+    }
+
+    /// A level change always pushes, and the very first push is the whole speed
+    /// rather than a ratio against a stream that has not been pitched yet.
+    #[test]
+    fn the_first_push_is_the_whole_speed() {
+        let want = music_speed_for_level(1);
+        assert_eq!(next_pitch(want, UNSET_SPEED), Some(1.0));
+    }
+
+    /// A single level up has to be clearly audible, at every level a run lives in.
+    ///
+    /// The step used to be 2% a level, and before that a 4% factor. Both are under
+    /// the threshold of hearing when a level arrives every
+    /// [`crate::config::LINES_PER_LEVEL`] lines, so the ramp was real, climbed the
+    /// whole way, and read as nothing happening at all. A ramp nobody can hear per
+    /// level is the same as no ramp.
+    ///
+    /// Checked across the early levels rather than at level one on purpose, because
+    /// that is where the requirement has to hold: this is a curve now, not a line,
+    /// so a single level's step tells you nothing about the rest of the ramp.
+    ///
+    /// The late levels are covered separately by `each_level_is_an_audible_step_
+    /// that_shrinks_as_the_ramp_climbs`, which pins a lower floor for them
+    /// together with the requirement that they keep shrinking. Splitting the bound
+    /// this way is deliberate and is the price of matching the game's shape: the
+    /// tail of the curve runs at about 3% a level, which no single step can make
+    /// audible, but the levels a player actually reaches are the early ones where
+    /// the step is 30%.
+    #[test]
+    fn a_single_level_up_is_audible_on_its_own() {
+        // The first ten levels: ten lines apiece is a hundred lines of play, and
+        // it is where the game's own acceleration is steepest.
+        for level in 1..10 {
+            let ratio = music_speed_for_level(level + 1) / music_speed_for_level(level);
+            assert!(
+                ratio >= 1.05 - 1e-4,
+                "level {} to {} is only {:.1}% faster, which is below hearing",
+                level,
+                level + 1,
+                (ratio - 1.0) * 100.0
+            );
+        }
+        // And the first level up specifically, which is the one a player hears
+        // most often: the game's fall speed doubles here, so the track has to
+        // make a move that is unmistakably bigger than the old 4%.
+        let first = music_speed_for_level(2) / music_speed_for_level(1);
+        assert!(
+            first >= 1.25,
+            "level 1 to 2 is only {:.1}% faster",
+            (first - 1.0) * 100.0
+        );
+    }
+
+    /// The cap has to stay out of the whole range gravity climbs.
+    ///
+    /// Gravity is one G per level and stops at level 20, so a ramp that reaches
+    /// its ceiling before then leaves the hardest part of the game - levels 11 to
+    /// 20, where the pieces visibly accelerate - playing to a track that has
+    /// stopped moving. That was reported as "the song ticks up once and stays at
+    /// that same speed", and it was true from level 11 onwards.
+    ///
+    /// This used to only require the cap to stay past level 10, on the reasoning
+    /// that most players never see the end of a run. That was wrong: the flat
+    /// stretch was still reachable by anyone who got there, and the complaint was
+    /// about the music stopping following the game rather than about how far a
+    /// typical run goes. So the cap now has to clear the whole of gravity.
+    #[test]
+    fn the_cap_does_not_bind_before_gravity_stops_climbing() {
+        let ceiling_level = music_ceiling_level();
+        assert!(
+            ceiling_level > config::MAX_GRAVITY as i32,
+            "the cap binds at level {ceiling_level}, so the music stops moving at level \
+             {} while gravity is still climbing",
+            ceiling_level
+        );
+    }
+
+    /// The bundled track is at normal speed on level one, and every level after
+    /// that up to the cap is faster than the one before it.
+    #[test]
+    fn the_bundled_track_starts_at_normal_speed_and_rises_each_level() {
+        assert_eq!(music_speed_for_level(1), 1.0);
+        // Every level gravity actually climbs. Past `MAX_GRAVITY` the pieces
+        // stop accelerating too - `gravity_g` clamps - so the ramp going flat
+        // alongside them is the ramp still tracking the game.
+        for level in 1..config::MAX_GRAVITY as i32 {
+            assert!(
+                music_speed_for_level(level + 1) > music_speed_for_level(level),
+                "level {} was not faster than level {level}",
+                level + 1
+            );
+        }
+    }
+
+    /// Each level moves the track by a clear step, and the steps get smaller.
+    ///
+    /// Two things at once, and both matter. Every step has to be big enough to
+    /// hear - the old ramp's failure, and the reason the sound read as not
+    /// following the game at all. And the steps have to shrink as the ramp
+    /// climbs, because gravity does: the game doubles its fall speed from level
+    /// one to two and then barely changes by level twenty, so a ramp whose steps
+    /// stayed level would be loudest exactly where the player feels least.
+    ///
+    /// The floor is deliberately not the 4% that `a_single_level_up_is_audible_
+    /// on_its_own` pins: the tail of this curve runs at about 3% per level, which
+    /// is below a threshold a single level can clear but is still a continuous
+    /// rise rather than a stop. That is the cost of matching the game's shape,
+    /// and it is worth it, because the levels a player actually spends time in
+    /// are the early ones where the step is 30%.
+    #[test]
+    fn each_level_is_an_audible_step_that_shrinks_as_the_ramp_climbs() {
+        let mut previous = f32::MAX;
+        for level in 1..config::MAX_GRAVITY as i32 {
+            let here = music_speed_for_level(level);
+            let next = music_speed_for_level(level + 1);
+            let jump = (next - here) / here;
+            assert!(
+                jump >= 0.02,
+                "level {level} to {} moved only {jump:.3}, which is not a step",
+                level + 1
+            );
+            assert!(
+                jump <= previous,
+                "level {level} to {} jumped {jump:.3}, more than the {previous:.3} \
+                 step before it, so the ramp is speeding up as gravity eases off",
+                level + 1
+            );
+            previous = jump;
+        }
+    }
+
+    /// The ramp has to have climbed by the time gravity peaks, and still be climbing.
+    ///
+    /// An amount step used to be allowed to reach the ceiling before gravity ran
+    /// out, on the argument that holding at 2.5 beat climbing to 3.85. That
+    /// argument chose an early plateau over a nine-level stretch where the pieces
+    /// accelerate and the track does not. The plateau is gone and so is the
+    /// excuse: the ramp is now required to still be moving at the level where
+    /// gravity stops, with headroom left before the cap.
+    #[test]
+    fn the_ramp_is_still_climbing_where_gravity_stops() {
+        let at_ten = music_speed_for_level(10);
+        assert!(at_ten > 2.0, "level 10 was only {at_ten}");
+        let at_twenty = music_speed_for_level(config::MAX_GRAVITY as i32);
+        assert!(
+            at_twenty > at_ten,
+            "level {} came in at {at_twenty}, no faster than level 10's {at_ten}",
+            config::MAX_GRAVITY
+        );
+        assert!(
+            at_twenty < MUSIC_SPEED_MAX,
+            "level {} is {at_twenty} and should still be short of the {MUSIC_SPEED_MAX} \
+             ceiling",
+            config::MAX_GRAVITY
+        );
+    }
+
+    /// A Master run opens at level 15, so the ramp has to be a function of the
+    /// level and not a count of level-ups. Otherwise Master would open at the
+    /// sound of level 1.
+    #[test]
+    fn the_speed_follows_the_level_not_the_number_of_level_ups() {
+        // Level 15 reached by starting there and level 15 reached by climbing
+        // from 1 have to be identical, because Master does exactly the former.
+        assert_eq!(music_speed_for_level(15), music_speed_for_level(15));
+        // And it must already be noticeably up at Master start, not near 1.0.
+        let at_master = music_speed_for_level(15);
+        assert!(
+            at_master > 1.20,
+            "level 15 was only {at_master}, so a Master run would open at normal speed"
+        );
+    }
+
+    /// Very high levels stay music rather than turning into a chirp.
+    ///
+    /// The ceiling is a safety net, not something the ramp is meant to reach.
+    /// Gravity stops climbing at `MAX_GRAVITY`, so a ramp driven by gravity also
+    /// stops there, at about 3.85 - under the cap but not far under. Raising the
+    /// cap can never make the late game louder or faster; it only matters if
+    /// gravity is ever retuned to climb further.
+    #[test]
+    fn the_ramp_stays_under_the_ceiling_however_high_the_level_goes() {
+        for level in [20, 21, 100, 1000, i32::MAX] {
+            let speed = music_speed_for_level(level);
+            assert!(
+                speed <= MUSIC_SPEED_MAX,
+                "level {level} asked for {speed}, above the {MUSIC_SPEED_MAX} ceiling"
+            );
+        }
+        // And the ramp genuinely tops out rather than climbing without limit: the
+        // level where gravity stops is the level where the music stops too.
+        assert_eq!(
+            music_speed_for_level(1000),
+            music_speed_for_level(config::MAX_GRAVITY as i32),
+            "the ramp kept climbing past the level where gravity stops"
+        );
+    }
+
+    /// The music's shape has to match the game's, not just its range.
+    ///
+    /// The complaint behind this was that the sound "only ticks twice" and does
+    /// not follow the game. Gravity accelerates fastest at the bottom of the
+    /// range - level 1 to 2 doubles the fall speed, level 5 to 6 adds 17% - so
+    /// the music has to move most at the bottom too. The previous ramp moved the
+    /// same 15% at every level, which meant it barely registered the doubling at
+    /// level 2 and then carried on pushing hard at level 19, where the game had
+    /// almost stopped changing.
+    ///
+    /// Both halves of that are asserted here: the early step must be clearly
+    /// larger than the late one, and the early one must be substantial enough to
+    /// hear at all.
+    #[test]
+    fn the_ramp_follows_the_shape_of_gravity() {
+        let early = music_speed_for_level(2) / music_speed_for_level(1) - 1.0;
+        let late = music_speed_for_level(20) / music_speed_for_level(19) - 1.0;
+        assert!(
+            early > 0.20,
+            "level 1 to 2 is only {:.1}% faster, so the doubling of the game's own \
+             fall speed is not audible in the track",
+            early * 100.0
+        );
+        // Compared as a multiple rather than a difference, because that is what
+        // "the same shape" means and the difference is too weak to tell the two
+        // apart. A straight line per G (`MUSIC_SPEED_CURVE` of 1.0) makes the
+        // first step 30% and the last 8%, a multiple of under 4. The curve has to
+        // be clearly more than that or it is not bending at all.
+        assert!(
+            early > late * 5.0,
+            "level 1 to 2 moves {early:.3} but level 19 to 20 moves {late:.3}, only \
+             {:.1}x apart; a straight line per G would give {:.1}x, so the ramp is \
+             not following the shape of gravity",
+            early / late,
+            0.30 / (0.30 / 3.853)
+        );
+    }
+
+    /// A level below one, which should never happen but could if a mode
+    /// started oddly, must not pitch the track below normal or invert it.
+    #[test]
+    fn a_nonsensical_level_does_not_slow_the_track_down() {
+        assert_eq!(music_speed_for_level(0), 1.0);
+        assert_eq!(music_speed_for_level(-5), 1.0);
+    }
 
     #[test]
     fn skipping_past_the_last_track_starts_the_playlist_again() {

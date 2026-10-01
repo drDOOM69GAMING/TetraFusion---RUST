@@ -1,6 +1,6 @@
 [package]
 name = "tetrafusion"
-version = "2.2.0"
+version = "2.2.1"
 edition = "2021"
 description = "A Rust port of TetraFusion 2.1 by drDOOM69GAMING (MIT)"
 

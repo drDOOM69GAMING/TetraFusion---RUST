@@ -15,7 +15,10 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn label(self) -> &'static str {
+    /// Const so the manual can be written out of the real names rather than a
+    /// copy of them. A hand copied list of mode names is a list that goes
+    /// stale the moment a mode is renamed.
+    pub const fn label(self) -> &'static str {
         match self {
             Mode::Marathon => "Marathon",
             Mode::Sprint => "Sprint",
@@ -70,7 +73,11 @@ impl Mode {
     /// lines or about the clock, so a player picking it from a list of five words
     /// is guessing. Drawn under the highlighted menu entry, they turn the menu
     /// from five labels into five rules.
-    pub fn blurb(self) -> &'static str {
+    ///
+    /// Const for the same reason as [`Mode::label`]: the manual quotes these
+    /// rather than a copy, so a mode that changes its rule cannot keep a page
+    /// that still describes the old one.
+    pub const fn blurb(self) -> &'static str {
         match self {
             Mode::Marathon => "Endless. Level up every 10 lines.",
             Mode::Sprint => "Clear 40 lines as fast as you can.",
@@ -570,13 +577,24 @@ impl Game {
 
     /// A successful move or rotate refreshes lock delay while the piece is
     /// resting on the stack, up to the reset budget.
+    ///
+    /// Leaving the ground has to *cancel* the timer, not just decline to refresh
+    /// it. The timer used to be left running, and gravity is only given a chance
+    /// to run once a whole `fall_speed` has passed - at level one that is a full
+    /// second, while [`LOCK_DELAY_TIME`] is half of one. So a piece slid off the
+    /// edge of a ledge kept a stale countdown, the countdown expired first, and
+    /// the piece locked hanging in mid-air. Holding a direction to move into place
+    /// is exactly how a player slides off a ledge, which is why it looked like the
+    /// piece sticking in places it should have dropped from.
     fn on_piece_moved(&mut self, now: u64) {
-        if self.is_grounded() {
-            if self.lock_resets < MAX_LOCK_DELAY_RESETS && self.lock_moves < MAX_LOCK_DELAY_MOVES {
-                self.lock_resets += 1;
-                self.lock_moves += 1;
-                self.grounded_since = Some(now);
-            }
+        if !self.is_grounded() {
+            self.grounded_since = None;
+            return;
+        }
+        if self.lock_resets < MAX_LOCK_DELAY_RESETS && self.lock_moves < MAX_LOCK_DELAY_MOVES {
+            self.lock_resets += 1;
+            self.lock_moves += 1;
+            self.grounded_since = Some(now);
         }
     }
 
@@ -866,9 +884,15 @@ impl Game {
         self.advance_gravity(now);
         self.soft_dropping = false;
 
-        if let Some(since) = self.grounded_since {
-            if now.saturating_sub(since) >= LOCK_DELAY_TIME as u64 {
-                self.lock_now(now);
+        // The timer only ever expires for a piece that is resting. `on_piece_moved`
+        // cancels it when the piece leaves the ground, but a lock is the one thing
+        // that must never be reached from a stale timestamp, so the resting check
+        // is repeated here rather than trusted to one caller.
+        if self.is_grounded() {
+            if let Some(since) = self.grounded_since {
+                if now.saturating_sub(since) >= LOCK_DELAY_TIME as u64 {
+                    self.lock_now(now);
+                }
             }
         }
     }
@@ -2094,6 +2118,10 @@ mod tests {
     /// The blurb and the code that enforces it must not drift.
     #[test]
     fn each_blurb_agrees_with_the_number_the_game_uses() {
+        // The blurb spells the number out rather than formatting the constant, because
+        // `blurb` is a `const fn` and `format!` is not const. This is what stops
+        // the menu promising one cadence while the game runs another - which it
+        // did once, when the constant moved to five and the blurb still said ten.
         assert!(Mode::Marathon.blurb().contains(&LINES_PER_LEVEL.to_string()));
         assert!(Mode::Sprint.blurb().contains(&SPRINT_TARGET_LINES.to_string()));
         assert!(
@@ -2174,6 +2202,65 @@ mod tests {
             g.apply(Action::MoveRight, at);
         }
         assert_eq!(g.pieces_dropped, 0, "lock delay was not refreshed");
+    }
+
+    /// Holding a direction to slide a resting piece along the stack must not
+    /// freeze it where the ledge ends.
+    ///
+    /// The lock timer is a countdown from the moment the piece came to rest.
+    /// Refreshing it while the piece slides is right; leaving it running once the
+    /// piece has left the ground is not, because gravity only gets to run once a
+    /// whole `fall_speed` interval has passed and the timer expires long before
+    /// that at low levels. The piece then locked hanging in the air, which is what
+    /// a player sees as the piece sticking in places it should have dropped from.
+    #[test]
+    fn sliding_off_a_ledge_does_not_lock_the_piece_in_mid_air() {
+        let mut g = game(Mode::Marathon);
+        let floor = TOTAL_ROWS as i32 - 1;
+        // A full floor so nothing can fall out of the well, and a raised ledge on
+        // the left whose right-hand edge is a genuine step down into open air.
+        for x in 0..GRID_WIDTH as i32 {
+            g.grid.force_set(x, floor, 1);
+        }
+        for y in (floor - 3)..floor {
+            for x in 0..8 {
+                g.grid.force_set(x, y, 1);
+            }
+        }
+        // Start clear of the ledge and let gravity land the piece on top of it.
+        g.origin.1 = floor - 8;
+        let mut t = 0u64;
+        while !g.is_grounded() && t < 100_000 {
+            t += 100;
+            g.tick(t);
+        }
+        assert!(g.is_grounded(), "the piece never came to rest");
+        assert!(
+            g.origin.1 < floor - 3,
+            "the piece came to rest on the floor, not on the ledge"
+        );
+
+        // Slide right until it hangs over the step.
+        for _ in 0..40 {
+            if !g.is_grounded() {
+                break;
+            }
+            t += 10;
+            g.apply(Action::MoveRight, t);
+        }
+        assert!(!g.is_grounded(), "the piece never left the ledge");
+        assert!(
+            g.grounded_since.is_none(),
+            "leaving the ground must cancel the lock timer, not leave it running"
+        );
+
+        // Well past the lock window, but still inside one gravity interval
+        // (`base_fall_speed` is 1000 ms here), so gravity has not run.
+        g.tick(t + LOCK_DELAY_TIME as u64 + 100);
+        assert_eq!(
+            g.pieces_dropped, 0,
+            "the piece locked in mid-air instead of falling"
+        );
     }
 
     #[test]

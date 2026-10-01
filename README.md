@@ -7,12 +7,12 @@ kicks, the 7-bag randomizer, lock delay, T-spin detection, combo,
 back-to-back, all five modes, the Options menu and the full sound set, while
 fixing three rules-layer bugs found in the Python original.
 
-> **Current release: 2.2.0.** Grab `TetraFusion-2.2.0-packed.exe` from the
-> [releases page](https://github.com/drDOOM69GAMING/TetraFusion---RUST/releases/tag/v2.2.0)
+> **Current release: 2.2.1.** Grab `TetraFusion-2.2.1-packed.exe` from the
+> [releases page](https://github.com/drDOOM69GAMING/TetraFusion---RUST/releases/tag/v2.2.1)
 > and run it. That single file is the whole game. The fifteen backgrounds, all
 > five sounds and the icon are packed into the executable, so there is nothing
 > to install and nothing to copy next to it. The "2.1" in the title is the
-> version of the original Pygame game being ported; 2.2.0 is this port's own
+> version of the original Pygame game being ported; 2.2.1 is this port's own
 > version number.
 
 > The original source used for reference lives at
@@ -36,7 +36,7 @@ Builds only need `libclang` on the lookup path:
 ```powershell
 $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
 cargo run           # play immediately
-cargo test          # 435 tests covering the rules layer + live play-throughs
+cargo test          # 495 tests covering the rules layer + live play-throughs
 ```
 
 The output binary is `target\debug\tetrafusion.exe` (or
@@ -189,10 +189,14 @@ that quietly lacks it. `no_embedded_asset_is_empty` and
 `embedded_files_have_the_right_magic_bytes` catch a file that is present but is
 not the format its extension claims.
 
-`examples/asset_probe.rs` is the diagnostic that found both traps, kept because
-it is the fastest way to tell "the memory route is missing from this build" apart
-from "these bytes are wrong": it tries the same data both ways and prints both
-answers.
+The two traps are covered by different means, and the difference matters. The
+format-string trap is a compile-time constant, so
+`memory_loader_formats_are_dotted_and_type_specific` checks it directly. The
+borrowed-buffer trap cannot be checked by inspecting source, because the bug is
+the *absence* of an owner: nothing looks wrong. It is caught by running the real
+executable, since the failure is the game loop stopping and the process sitting
+at 100% CPU, which `the_exe_alone_is_a_complete_game` fails on when the run does
+not finish on its own.
 
 ## Where your settings live
 
@@ -347,9 +351,52 @@ to delete, `ENTER` to save and play again, `ESC` to abandon. The original's
 | Training keeps no record | It never ends, so there is no moment to offer initials at. |
 | Missing or corrupt file is an empty table | The table is an enhancement, not a precondition. The game must start. |
 
-The standing record is drawn on the pause overlay as `High: 12400 (ACE)`, as in
-the original. Without it a record is invisible except at the moment it was set,
-so a player can never tell what they are chasing.
+The standing record is drawn on the side panel above the score line, and again on
+the pause overlay as `High: 12400 (ACE)`, as in the original. Without it a
+record is invisible except at the moment it was set, so a player can never tell
+what they are chasing.
+
+### The celebration
+
+Beating the record throws tetromino pieces across the whole screen for three
+seconds. This is new; the original had nothing for it.
+
+Each shard is a real tetromino taken from `pieces.rs` rather than a coloured
+square, thrown from the middle of the layout in a random direction, spinning,
+falling under gravity, and fading in over its first 8% of life and out over its
+last 40%. Eighteen are thrown a second, so the screen is never empty and the
+stack behind them is still visible.
+
+Three details that are choices rather than defaults:
+
+- **It covers the side panel as well as the well.** Every other particle system
+  works in playfield cell space, because it is reporting something that happened
+  to a piece. A record happened to the run, so this works in layout pixels
+  across the full 819, and the panel is where the high score you just beat is
+  displayed.
+- **It draws behind the initials prompt, not over it.** You have three letters to
+  type and a standing record to compare against, and burying either to make the
+  celebration bigger would trade away the moment it is celebrating.
+- **It is three seconds, which is longer than any other timed effect in the
+  game.** `LEVEL_TRANSITION_MS` and `TETRIS_FLASH_MS` are both 2000. You are sent
+  to the initials screen the instant a run is recognised as a record, so a
+  one-second celebration is a flash you spend the whole time typing through, and
+  much longer than this stops being an event and becomes the wallpaper.
+
+A run that does not beat the record throws nothing at all. The trigger is the
+same `is_record` comparison the table uses to decide whether to file the score,
+extracted as a pure `run_end` so it is testable: it fires on exactly one frame in
+a whole run, which is the kind of thing that can be wired to the wrong condition
+and go unnoticed for months. Leaving the record screen stops it.
+
+Source: `src/celebrate.rs`. *Regression tests:*
+`only_a_run_that_set_a_record_is_celebrated`,
+`nothing_happens_until_a_record_is_set`,
+`a_record_throws_pieces_for_the_whole_window`, `it_stops_after_its_window`,
+`every_shard_is_a_real_tetromino`, `the_burst_reaches_the_panel_as_well_as_the_well`,
+`the_burst_goes_in_every_direction`, `a_shard_falls_and_comes_back_down`,
+`a_shard_fades_in_and_out`, `the_rate_is_per_second_and_not_per_frame`,
+`starting_again_does_not_stack`.
 
 ## Options screen
 
@@ -955,6 +1002,50 @@ up: gravity climbs to 20G by level 20 (see [Gravity](#gravity)), the piece skin
 and palette move on, and the whole stack flashes through random colours for two
 seconds.
 
+### The music speeds up with the game
+
+The music's playback rate follows the level, and the point worth being explicit
+about is that it follows **gravity**, not the level number.
+
+The first version of this ticked the tempo up a fixed amount per level. It
+sounded wrong without being obviously wrong, and the reason is that the game's
+own speed does not climb evenly. Gravity is `0.85 ** (level - 1)`, so falling
+speed **doubles** from level 1 to level 2 and then flattens out towards the
+`MIN_FALL_SPEED` floor. A level number that steps by one every ten lines is very
+different at level 2 than at level 19.
+
+So the ramp is retied to the same curve the game uses:
+
+```
+music_speed_for_level(level) =
+    (1.0 + (gravity_g(level) - 1).powf(0.765) * 0.30).min(4.0)
+```
+
+which gives, for the fall speed the player actually feels:
+
+| Level | Fall speed | Music speed |
+| ----- | ---------- | -----------|
+| 1 | 1000 ms | 1.00 |
+| 2 | 500 ms | 1.30 |
+| 5 | 200 ms | 1.87 |
+| 10 | 100 ms | 2.61 |
+| 20 | 50 ms | 3.85 |
+
+The exponent is what makes it follow the shape rather than the size, and the cap
+of 4.0 sits above anything gravity reaches inside its own range, so it never
+binds and flattens the ramp while the game is still speeding up.
+
+Being honest about what that costs: the curve's tail runs about 3% per level
+around level 19-20, which is below single-step audibility. Early levels are
+pinned at 5% or more and the level 1 to level 2 step is at least 25%, and a
+separate test holds the late levels to a 2% floor, but a 3% step is not
+something you will hear on its own.
+
+*Regression tests:* `the_ramp_follows_the_shape_of_gravity`,
+`the_cap_does_not_bind_before_gravity_stops_climbing`,
+`each_level_is_an_audible_step_that_shrinks_as_the_ramp_climbs`,
+`the_ramp_stays_under_the_ceiling_however_high_the_level_goes`.
+
 Two raylib details are load-bearing here, and both of them failed silently at
 first.
 
@@ -965,9 +1056,13 @@ sets `Music.looping = true` and `UpdateMusicStream` only stops and rewinds when
 `src/audio.rs` calls `set_looping(false)` on custom tracks and leaves the bundled
 track alone. The decision of what to do next is a pure function,
 `audio::music_action`, returning `EnsurePlaying` / `Wait` / `Advance` / `Start`,
-which is what makes the advance path testable without an audio device; a named
-regression test, `a_custom_playlist_advances_instead_of_repeating_one_track`,
-pins it.
+which is what makes the advance path testable without an audio device; named
+regression tests pin it: `a_custom_track_that_stops_advances_to_the_next_song`,
+`a_single_track_playlist_skips_to_itself`,
+`walking_the_whole_playlist_returns_to_the_start` and
+`skipping_past_the_last_track_starts_the_playlist_again`. The last of those
+matters because `next_track` divides by the playlist length, so an empty folder
+has its own test, `an_empty_playlist_does_not_divide_by_zero`.
 
 The other is a lifetime trap. `LoadMusicStreamFromMemory` does **not** copy the
 bytes you hand it: for an Ogg it calls `stb_vorbis_open_memory` and parks the
@@ -1063,8 +1158,10 @@ Two details are load-bearing and pinned by tests:
   still matter. It lives in `spawn_piece` rather than in the gravity timer so
   it covers *every* spawn, including the one at the top of a frame where no
   gravity tick happened to be due. *Regression tests:*
-  `a_piece_spawned_at_20_gravity_lands_on_the_floor_immediately`,
-  `only_20_gravity_spawns_instantly`.
+  `a_piece_spawns_already_landed_at_the_gravity_ceiling`,
+  `a_piece_below_the_ceiling_still_spawns_at_the_top`, and
+  `gravity_is_one_g_at_level_one_and_rises_to_the_ceiling` for the ramp that
+  decides where the ceiling is.
 
 The curve is not a straight line on screen even though it is one in
 `fall_speed_for`, because the cadence is quantised to whole milliseconds: 400 ms
@@ -1084,13 +1181,31 @@ so they are always there; a `assets/backgrounds/N.jpg` on disk overrides the
 embedded copy, which is how you swap in your own. All fifteen are decoded once at
 startup. The game is still playable without them: a file that will not decode is
 skipped and the plain backdrop is drawn instead. The photo is cover-fitted
-(scaled to fill, centred, overflow cropped) so no letterboxing shows, then dimmed
-by `DIM` in `src/backgrounds.rs`, that dim is load-bearing, since blocks, the
-ghost piece and the grid lines must stay readable on top of an arbitrary picture.
-It is 100 of 255, about 39%: heavy enough to flatten any photo into a backdrop,
-light enough that you can still see the photo. Raise or lower it there to taste.
-**Options > Backgrounds** turns the photos off entirely for a plain backdrop,
-without unloading them, so switching back on is instant.
+(scaled to fill, centred, overflow cropped) so no letterboxing shows, and it
+covers the whole 819-pixel-wide layout, well and side panel both, so the panel is
+never left on the plain backdrop.
+
+It is then dimmed, and the dim is **two values, not one**: `DIM_WELL` and
+`DIM_PANEL` in `src/backgrounds.rs`. The split is the fix for "the background
+never changes with the level". The dim is load-bearing behind the well, since
+blocks, the ghost piece and the grid lines must stay readable on top of an
+arbitrary picture, so `DIM_WELL` is 100 of 255, about 39%. Applied flat across
+the whole screen, though, that also dimmed the side panel, and the panel has no
+blocks in it: there is nothing there that needs the protection.
+
+Measured over all fifteen bundled photos, the average luminance behind the old
+flat dim sat between 36 and 53 out of 255, so 14% to 21% grey. A photo that
+starts nearly black, dimmed into being invisible, swapped for a *different*
+photo that is also nearly black, is not a background change a player can see.
+`DIM_PANEL` is 30 instead, which puts the same fifteen photos between 52 and 76
+there, and the panel is also where the high score, the score and the level live,
+so it is the region you are looking at when a level changes.
+
+Both bounds are pinned by tests that measure the actual embedded photos rather
+than trusting the constants to taste: `the_panel_is_bright_enough_for_the_photo_to_read_as_a_photo`
+and `the_well_stays_a_dark_backdrop_for_the_blocks`. **Options > Backgrounds**
+turns the photos off entirely for a plain backdrop, without unloading them, so
+switching back on is instant.
 
 To add your own, drop numbered JPEGs into `assets/backgrounds/` next to the exe.
 They load after the embedded ones, so `16.jpg` and up extend the set, and
@@ -1173,8 +1288,12 @@ src/
   game.rs     Game: gravity, DAS/ARR, lock delay, scoring, modes, events
   render.rs   3D gloss blocks, board, side panel, menus, banners, fit/present
   scores.rs   per-mode records with three-letter initials; the entry field
+  manual.rs   the in-game manual pages, rendered from text in the source
   effects.rs  trail / gesture / dust / explosion particle systems
              plus the Matrix rain's hand-drawn katakana glyph table
+  celebrate.rs the new-record celebration: tetromino shards thrown across the
+             whole layout. Screen space, not cell space, and its own module
+             because it reports something about the run rather than a piece
   keys.rs     keycode <-> name table (a checked stand-in for raylib's enum)
   pad.rs      controller bindings, SDL-compatible values, capture + slots
   music_dir.rs folder scanning and playlist rules
@@ -1184,9 +1303,6 @@ src/
               one-time migration out of the old working-directory location
 build.rs     compiles ICON1.ico into the exe's resource section (.rsrc)
 tools/
-  ascii-fix.ps1        rewrites a text file to pure ASCII, reporting every
-                       token it changed
-  ascii-fix-sources.ps1 the same for src/ + tests/ + examples/
   publish-github.ps1   one tree + one commit through the GitHub API, for a
                        machine with no git installed. Reads $env:GH_TOKEN
   upload-release.ps1   uploads target\release\tetrafusion.exe to a release,
@@ -1194,8 +1310,6 @@ tools/
 tests/
   icon.rs     the linked binary really carries the icon, read from the .exe
   portable.rs the exe alone, in an empty folder, is a complete game
-examples/
-  asset_probe.rs  diagnostic: decodes an asset from memory and from a file
 assets/
   tetris-blocks.TTF, music and effect OGGs (copied from the original)
   backgrounds/N.jpg  per-level background photos
@@ -1204,7 +1318,7 @@ assets/
 
 ## Testing
 
-`cargo test` runs 435 tests across the rules layer, settings serialization,
+`cargo test` runs 495 tests across the rules layer, settings serialization,
 the per-user data folder (every platform rule, plus the one-time migration out of
 the old working-directory location, exercised against real files in a temp
 folder),
