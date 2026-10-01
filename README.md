@@ -1,10 +1,10 @@
-# TetraFusion 2.1 â€” Rust Edition
+# TetraFusion 2.1  Rust Edition
 
 A faithful Rust port of **TetraFusion 2.1** by drDOOM69GAMING (MIT-licensed
 Pygame game), built with [raylib-rs](https://github.com/raysan5/raylib-rs)
-(raylib 5.5). It reproduces the original's rules â€” SRS rotation and wall
+(raylib 5.5). It reproduces the original's rules  SRS rotation and wall
 kicks, the 7-bag randomizer, lock delay, T-spin detection, combo,
-back-to-back, all five modes, the Options menu and the full sound set â€” while
+back-to-back, all five modes, the Options menu and the full sound set  while
 fixing three rules-layer bugs found in the Python original.
 
 > The original source used for reference lives at
@@ -20,7 +20,7 @@ Toolchain requirements (a stock **Rust stable (MSVC)** install plus these):
 | Tool | Why | Where |
 | ---- | --- | ----- |
 | MSVC Build Tools | Rust MSVC linker (`link.exe`) | `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools` |
-| CMake â‰¥ 3.x | builds raylib-sys | `C:\Program Files\CMake\bin` |
+| CMake ≥ 3.x | builds raylib-sys | `C:\Program Files\CMake\bin` |
 | LLVM / libclang | clang-sys bindings used at build time | `C:\Program Files\LLVM\bin` |
 
 Builds only need `libclang` on the lookup path:
@@ -35,7 +35,7 @@ The output binary is `target\debug\tetrafusion.exe` (or
 `target\release\tetrafusion.exe` after `cargo build --release`). This is a
 native windowed app; run it from a desktop session. The exe finds `assets\`
 no matter where it is launched from: `cargo run`, a double-click inside
-`target\release`, or a copy of the exe anywhere under the project â€” asset
+`target\release`, or a copy of the exe anywhere under the project  asset
 lookup walks up the directory tree from the working directory *and* the exe
 folder. Sound is non-fatal: no audio device, or missing assets, degrade to
 silence instead of a crash.
@@ -73,28 +73,28 @@ a new game starts fresh from there.
 
 Gamepad (controller, like the original): plug in a stick and the D-pad and
 left stick steer, held down soft-drops, and the face buttons act like the
-keyboard â€” **A** rotates, **B** hard-drops, **X** holds, **Y** pauses. The
+keyboard  **A** rotates, **B** hard-drops, **X** holds, **Y** pauses. The
 D-pad also navigates the menus (**A**/**B** select/back). Button presses move
 the piece the same way key presses do; holding either direction uses the same
-DAS/ARR as the keyboard. All of it is remappable â€” see
+DAS/ARR as the keyboard. All of it is remappable  see
 [Controllers](#controllers).
 
-The mouse is inert during play â€” controls are keyboard and controller only.
+The mouse is inert during play  controls are keyboard and controller only.
 The cursor never steers or clicks the piece, so it can't fight the keys or pad.
 
 DAS/ARR (delayed auto-shift / auto-repeat) default to 150 ms / 50 ms and are
 tunable in the Options menu. Up/Down in the menus and on the Options screen
-move one entry per press â€” holding the key does not zip through the list.
+move one entry per press  holding the key does not zip through the list.
 
 ## Window sizing and fullscreen
 
-The game is laid out once at a fixed 819Ã—930 virtual resolution and drawn into
+The game is laid out once at a fixed 819×930 virtual resolution and drawn into
 an off-screen texture every frame, which is then scaled to fit whatever the
 real framebuffer is. Resizing the window, maximising it, or pressing `F11`
 therefore just re-fits the same image: it scales to fill, stays centred, keeps
 its aspect ratio, and gets black bars on whichever axis has room to spare.
 
-Drawing straight into the framebuffer instead â€” the obvious approach â€” only
+Drawing straight into the framebuffer instead  the obvious approach  only
 looks right at exactly one window size. Maximise it and every coordinate stays
 pinned to the top-left at its original pixel size, with black filling the rest.
 
@@ -117,7 +117,7 @@ Explorer, the taskbar button, Alt-Tab and the title bar all read the icon group
 resource in the `.exe`'s resource section, and no runtime call can put one there.
 
 `build.rs` writes a two-line `.rc` and runs a resource compiler (`llvm-rc`,
-`rc.exe` or `windres` â€” searched on `PATH`, then in the usual LLVM and MSYS2
+`rc.exe` or `windres`  searched on `PATH`, then in the usual LLVM and MSYS2
 install directories) to produce a linker input that is attached with
 `cargo:rustc-link-arg-bins`. The icon is declared twice on purpose:
 
@@ -135,7 +135,7 @@ compiler was used and where the compiled resource landed.
 
 The first version unwrapped the `.ico` container in Rust and handed the pixels to
 `SetWindowIcon` at startup. It compiled, reported success, and produced *no icon
-anywhere* â€” in the window, on the taskbar button, or in Explorer. Three separate
+anywhere*  in the window, on the taskbar button, or in Explorer. Three separate
 things had to be true and none of them were:
 
 - **`SetWindowIcon` cannot reach Explorer or the taskbar entry.** It only replaces
@@ -143,7 +143,7 @@ things had to be true and none of them were:
   read from the resource section, which nothing was writing to.
 - **GLFW was overwriting the window icon with a blank one.** GLFW's Win32
   `createIcon` builds a 1-bit AND mask with `CreateBitmap(...)` and never writes to
-  it, so the mask is all zeros â€” which Windows reads as *fully transparent*. The
+  it, so the mask is all zeros  which Windows reads as *fully transparent*. The
   resulting HICON is valid, `GetIconInfo` reports `fIcon=True`, and
   `DrawIconEx` renders nothing at all. The runtime call therefore replaced a
   perfectly good default with an invisible icon.
@@ -155,8 +155,8 @@ things had to be true and none of them were:
 
 Verified against the built binary rather than assumed: `llvm-readobj
 --coff-resources` shows a `.rsrc` section containing `Name: GLFW_ICON` and
-`Name: (ID 1)` with the 10667-byte PNG payload, and `ExtractIconEx` â€” the exact
-API Explorer consults â€” returns 2 valid icons instead of 0.
+`Name: (ID 1)` with the 10667-byte PNG payload, and `ExtractIconEx`  the exact
+API Explorer consults  returns 2 valid icons instead of 0.
 
 ## Modes
 
@@ -164,19 +164,19 @@ From the menu, select one of the original's five, plus **Options** and **Quit**.
 Each entry states its own rule underneath, so the mode list is a list of rules
 rather than five bare words:
 
-- **Marathon** â€” 15Ã—31 well, normal rules, endless. Level up every 10 lines.
-- **Sprint** â€” clear 40 lines as fast as you can. A running clock is shown; the
+- **Marathon**  15×31 well, normal rules, endless. Level up every 10 lines.
+- **Sprint**  clear 40 lines as fast as you can. A running clock is shown; the
   finish time stops when the 40th line lands.
-- **Ultra** â€” three minutes, score as much as you can. A *countdown* is shown
+- **Ultra**  three minutes, score as much as you can. A *countdown* is shown
   and turns red for the last half-minute. The run ends **TIME UP**, not game over:
   surviving the full three minutes is not a loss and not a win either.
-- **Training** â€” never ends; a full board resets instead of game over;
+- **Training**  never ends; a full board resets instead of game over;
   `H` deletes the bottom row. Keeps no high score, because there is no moment at
   which one could be offered.
-- **Master** â€” endless, opens at level 15 with the fastest gravity the game
+- **Master**  endless, opens at level 15 with the fastest gravity the game
   allows, and keeps levelling from there.
 
-Master is reachable two ways â€” the mode, and `Difficulty: Master` in Options â€”
+Master is reachable two ways  the mode, and `Difficulty: Master` in Options 
 and both deliver all of it. That was not true: the difficulty option used to give
 200 ms/row gravity at *level 1*, so it was fast but scored and coloured like an
 opening. See `both_routes_to_master_open_at_level_fifteen`.
@@ -186,7 +186,7 @@ The results screen names the ending rather than reducing it to win or lose:
 
 | Mode | Ends when | Keeps a high score | Shows a clock |
 | ---- | --------- | ------------------ | ------------- |
-| Marathon | blocks reach the top | yes | no â€” it is endless, there is nothing to beat |
+| Marathon | blocks reach the top | yes | no  it is endless, there is nothing to beat |
 | Sprint | 40 lines are cleared | yes | elapsed, frozen at the finish |
 | Ultra | 3 minutes expire | yes | time remaining |
 | Training | never | no | elapsed |
@@ -217,22 +217,22 @@ to delete, `ENTER` to save and play again, `ESC` to abandon. The original's
 
 | Rule | Why |
 | ---- | --- |
-| Only a strictly better score is a record | A tie is not a record. Ties are common Ã¢â‚¬â€ same seed, same pieces, same score Ã¢â‚¬â€ and rewarding one lets a player farm names by replaying a good run until it sticks. |
+| Only a strictly better score is a record | A tie is not a record. Ties are common ” same seed, same pieces, same score ” and rewarding one lets a player farm names by replaying a good run until it sticks. |
 | A record only ever goes up | Losing to the board cannot delete it, and a worse replay cannot overwrite it. |
 | An empty entry does not save | The original guarded this with `if event.key == K_RETURN and initials`, and it is what stops a record being filed as `---`. |
-| Non-alphanumerics are dropped | Raylib's default font stops at codepoint 255 and labels are drawn with it directly, so a stored `Ã©` would render as a missing glyph on the pause overlay. |
+| Non-alphanumerics are dropped | Raylib's default font stops at codepoint 255 and labels are drawn with it directly, so a stored `é` would render as a missing glyph on the pause overlay. |
 | Training keeps no record | It never ends, so there is no moment to offer initials at. |
 | Missing or corrupt file is an empty table | The table is an enhancement, not a precondition. The game must start. |
 
 The standing record is drawn on the pause overlay as `High: 12400 (ACE)`, as in
-the original Ã¢â‚¬â€ without it a record is invisible except at the moment it was set,
+the original ” without it a record is invisible except at the moment it was set,
 so a player can never tell what they are chasing.
 
 ## Options screen
 
 The menu's **Options** entry opens the full settings screen from the
 original, cycled with Up/Down and Enter (Escape saves and returns). Settings
-persist to `settings.json` in the working directory â€” the one you launched the
+persist to `settings.json` in the working directory  the one you launched the
 game from, which for `cargo run` is the crate root. Every field has a safe
 default, so a missing or corrupt file just resets that option.
 
@@ -263,7 +263,7 @@ bottom of the screen.
 
 Row text is *measured*, not eyeballed. `center` used to place a label at
 `(SCREEN_WIDTH - width) / 2`, which is negative for anything wider than the
-450px column â€” and `draw_text` accepts a negative x without complaint, so an
+450px column  and `draw_text` accepts a negative x without complaint, so an
 over-long label did not look tight, it silently lost its first few characters
 off the left edge. That is how `Controller Keybinds: 8 of 8 bound - auto` came
 out as `oller Keybinds: 8 of 8 bound - auto`. Now the width is measured and the
@@ -281,25 +281,25 @@ per character at 24pt, taken from `MeasureText`, not estimated).
 
 **Options > Effects** picks the trail that follows the piece while it is
 steered or soft-dropped. Nothing trails during passive gravity, and steering
-into a wall still smokes â€” both are the original's, because the original spawned
+into a wall still smokes  both are the original's, because the original spawned
 from *held input state* rather than from whether a move landed. Dust on a hard
 drop and debris on a clear are separate systems that run whatever the Effect is
 set to. The same six Effects also shape the [gesture
 bursts](#gesture-particles) thrown by a slide, a rotation or a slam.
 
 `matrix` is the one effect deliberately improved on. The original drew a
-1-pixel-wide green bar, 6â€“15 pixels long, interpolating from bright head to
-faint tail â€” so the option named Matrix produced a green smear rather than
+1-pixel-wide green bar, 615 pixels long, interpolating from bright head to
+faint tail  so the option named Matrix produced a green smear rather than
 anything recognisable. This port draws **halfwidth katakana** falling in a
 column instead, re-rolling every 4 frames so the rain scrolls, bright at the
 leading edge and fading up the tail. The gradient is also the other way round
 from the original's: the original put the bright head at the top of a falling
 streak, which reads as code being dragged upwards.
 
-The symbols are a hand-drawn 5Ã—7 bitmap table (`KATAKANA` in `src/effects.rs`),
+The symbols are a hand-drawn 5×7 bitmap table (`KATAKANA` in `src/effects.rs`),
 not text, and the reason is a hard font limit: raylib's built-in font has glyphs
-for codepoints 32â€“255 only (`defaultFont.glyphs[i].value = 32 + i` in
-`rtext.c`), and halfwidth katakana is U+FF66â€“U+FF9D. The only font asset the
+for codepoints 32255 only (`defaultFont.glyphs[i].value = 32 + i` in
+`rtext.c`), and halfwidth katakana is U+FF66U+FF9D. The only font asset the
 game ships is a tetromino font with no kana either. Drawing the cells as
 rectangles means no font dependency, no atlas, no runtime codepoint mapping, and
 the same result on every platform.
@@ -342,14 +342,14 @@ Notes:
 ### Controllers
 
 Every controller input is remappable, on the buttons and on the sticks
-alike â€” nothing is hardwired. **Options > Controller Keybinds** has the eight
+alike  nothing is hardwired. **Options > Controller Keybinds** has the eight
 in-game actions plus a **Menu Nav Bindings** submenu for the four menu buttons,
 mirroring the original's three settings blocks (`controller_controls`,
 `controller_menu_navigation`, `controller_settings`).
 
 Enter on a row starts a capture; the next button *or stick direction* becomes
 the binding. **Back** cancels, so a rebind can never take away the way out of a
-menu â€” and Back is itself rebindable, which is why its own row is a capture row
+menu  and Back is itself rebindable, which is why its own row is a capture row
 like the rest.
 
 | Action | Default | Also available |
@@ -360,14 +360,14 @@ like the rest.
 | Rotate | A | Left stick click, right stick click |
 | Hard Drop | B | D-pad up |
 | Hold Piece | X | Start / Back |
-| Pause | Y | â€” |
-| Skip Track | â€” | Left shoulder / right shoulder |
+| Pause | Y |  |
+| Skip Track |  | Left shoulder / right shoulder |
 
 The stick and the D-pad are **additive, not alternatives**: whichever you push
 moves the piece, and both are live at once. Every press is an edge
 (`now && !last`), so a held direction moves the piece once and then hands over to
 DAS/ARR instead of repeating at the frame rate. `use_dpad` in the settings
-gates only automatic piece steering â€” the D-pad always navigates menus.
+gates only automatic piece steering  the D-pad always navigates menus.
 
 **Controller Settings** holds the stick threshold, the deadzone, whether the
 D-pad steers the piece, the repeat delay, and which slot the game reads. Slot 0
@@ -377,7 +377,7 @@ stop a controller in the second one from being used.
 Three notes on the original's settings, all of which are bugs the port fixes
 or hardens:
 
-- The original's D-pad defaults were `left: 14, right: 15, down: 13` â€” which
+- The original's D-pad defaults were `left: 14, right: 15, down: 13`  which
   are D-pad *right*, an unmapped MISC1 button, and D-pad *left*. Left and right
   were swapped and Down steered the wrong way. Corrected to 13/14/12. The menu
   nav defaults (11/12/0/1) were right and are kept.
@@ -388,7 +388,7 @@ or hardens:
   Anything unrecognised falls back to that action's default rather than
   silently unbinding the action.
 - The original's hat support has no equivalent in raylib, which exposes no hat
-  API at all â€” a `["hat", [x, y]]` binding resolves to the D-pad buttons
+  API at all  a `["hat", [x, y]]` binding resolves to the D-pad buttons
   (11/12/13/14) here, which is what it meant on every pad the original ran on.
   The `hat_threshold` value is kept so the file still round-trips.
 - Thresholds are clamped to `(0.01, 0.99)`, not to 1.0. A real stick at full
@@ -397,13 +397,13 @@ or hardens:
 
 ### Level tinting
 
-Piece and block colours shift as the level climbs, as in the original â€” the
+Piece and block colours shift as the level climbs, as in the original  the
 board cycles through a full colour rotation roughly every 25 levels rather
 than staying one flat palette. `render::level_tint` adds a per-level offset of
-`int(12Â·sin Î¸)`, `int(8Â·sin(Î¸+2.094))` and `int(10Â·sin(Î¸+4.189))` to the red,
-green and blue channels, where `Î¸ = level Ã— 0.25` radians, clamped to 0..255 per
+`int(12·sin θ)`, `int(8·sin(θ+2.094))` and `int(10·sin(θ+4.189))` to the red,
+green and blue channels, where `θ = level × 0.25` radians, clamped to 0..255 per
 channel. Threaded through `draw_3d_block` and `draw_piece`, and the hold and
-next previews go through the same path â€” they used to read the piece's raw
+next previews go through the same path  they used to read the piece's raw
 colour index, so the previews disagreed with the piece from level 2 onwards.
 
 ## Piece colours
@@ -412,7 +412,7 @@ There are two independent colour settings, and the difference between them is
 the point:
 
 - **Theme** is the original's 7 palettes, verbatim. It is an accessibility
-  feature â€” high contrast, monochrome, and so on â€” and it was not replaced.
+  feature  high contrast, monochrome, and so on  and it was not replaced.
 - **Piece Colours** is a two-way choice between palettes that morph with the
   level and standard Tetris colours.
 
@@ -420,15 +420,15 @@ the point:
 is no way for one draw path to read a theme while another reads a palette mode.
 
 **Adaptive** (the default) starts from the theme's palette and rotates hue by
-`STAGE_HUE_STEP = 0.12` turns (â‰ˆ43Â°) per level, with saturation and value
+`STAGE_HUE_STEP = 0.12` turns (≈43°) per level, with saturation and value
 riding two further sines so the result does not read as a mechanical rotation.
 Both sines, not one: a cosine is at its maximum at level 1, which silently
 brightened the very first level a player ever sees by 12%. Piece colours also
 rotate which palette slot they read, which is the original's behaviour and is
 kept.
 
-**Traditional** hands back a fixed standard-Tetris palette â€” I cyan, J blue,
-L orange, O yellow, S green, T purple, Z red â€” and ignores both the theme and
+**Traditional** hands back a fixed standard-Tetris palette  I cyan, J blue,
+L orange, O yellow, S green, T purple, Z red  and ignores both the theme and
 the level. This is the escape hatch for anyone who wants the new look without
 losing the one thing the original was good at: knowing what a piece is from a
 glance. Backgrounds, skins and particles all stay exactly as they are; only the
@@ -436,7 +436,7 @@ seven piece colours are pinned.
 
 Pinning the palette also pins the *slot*, not just the colours. `color_for`
 otherwise adds `level - 1` to the palette index, so a "Traditional" I piece
-would still have changed colour every ten lines â€” the option would have
+would still have changed colour every ten lines  the option would have
 promised something it did not deliver. Turning the shift off is therefore part
 of choosing Traditional, and a test walks the whole run to prove no piece ever
 changes. *Regression tests:* `a_pinned_palette_gives_every_piece_the_same_colour_all_run`,
@@ -446,7 +446,7 @@ changes. *Regression tests:* `a_pinned_palette_gives_every_piece_the_same_colour
 ## Piece skins
 
 **Options > Piece Skin** chooses the *material* a block is drawn in, as opposed
-to its colour. Twelve skins, in `src/skins.rs`, listed most-solid to most-flat ï¿½
+to its colour. Twelve skins, in `src/skins.rs`, listed most-solid to most-flat �
 which is also the order a run is played through:
 
 | Skin | Block looks like | Relief |
@@ -464,7 +464,7 @@ which is also the order a run is played through:
 | Halo | Hollow: one breathing ring inside an outline | 0.00 |
 | Neon | Minimalist glowing line-art, mostly empty | 0.00 |
 
-**Follows Stage** (the default) gives **every level its own skin** ï¿½
+**Follows Stage** (the default) gives **every level its own skin** �
 `LEVELS_PER_SKIN = 1`, so the cycle runs twelve levels before wrapping. It was
 `4`, then `2`, both of which were long enough that a player could climb several
 levels without the board looking any different: the level-up arrives, the banner
@@ -481,7 +481,7 @@ different reason. So "a different block type per stage" meant four stages that
 were the same square in different colours.
 
 Ten of the twelve are now genuinely solid, at ten different depths, and the two
-outline-only skins sit deliberately at `0.0` ï¿½ they are *drawn shapes* rather than
+outline-only skins sit deliberately at `0.0` � they are *drawn shapes* rather than
 lit solids, and a bevel on them would be a lie about what they are. `the_skin_list_is_a_descending_ladder_of_dimensionality`
 holds the order in place, so the run always walks down the ladder instead of
 stuttering.
@@ -547,7 +547,7 @@ threshold fails on Neon purely because `base * 0.14` rounds channels down.
 
 The Effects trail fires from *held input state*, which means a single tap and a
 rotation produced nothing at all. **Gestures** are the second particle system,
-and they fire on the event instead â€” a burst whenever the piece slides, rotates
+and they fire on the event instead  a burst whenever the piece slides, rotates
 or is slammed, anchored to the edge the piece travelled toward, because that is
 the edge that swept into new space. From the centre the particles would spend
 most of their life hidden inside the block.
@@ -556,10 +556,10 @@ Intensity scales with the level, as the stage does:
 
 ```
 gesture_power(level) = max(level / 20, 0.15)
-gesture_count(level) = round(2 + 10 Ã— power)     // 4 at level 1, 12 at level 20
+gesture_count(level) = round(2 + 10 × power)     // 4 at level 1, 12 at level 20
 ```
 
-Both ends of that are load-bearing. The floor stops level 1 throwing nothing â€”
+Both ends of that are load-bearing. The floor stops level 1 throwing nothing 
 a gesture that produces no particles reads as the Effect setting being broken,
 not as "subtle". The ceiling stops a late run putting hundreds of particles on
 every keypress. *Regression tests:*
@@ -575,7 +575,7 @@ paint a dark blob over the board.
 
 Every shot is a pure function of `(kind, direction, level, t)`. `t` walks a full
 turn, so a burst spreads in all directions and never piles up, and no random
-number is involved â€” which is what lets the shapes be asserted on at all.
+number is involved  which is what lets the shapes be asserted on at all.
 *Regression tests:* `a_gesture_is_reproducible`,
 `the_effects_move_in_visibly_different_directions`,
 `a_ripple_spreads_wider_than_it_spreads_tall`,
@@ -585,12 +585,12 @@ number is involved â€” which is what lets the shapes be asserted on at all.
 Soft drop deliberately does *not* throw a gesture. It is gravity, gravity fires
 on every row including passive falling, and treating it as a gesture would
 spray a burst once per row of a piece doing nothing. The held-key trail covers a
-soft drop and a hard drop â€” the drop a player actually chose â€” gets its slam.
+soft drop and a hard drop  the drop a player actually chose  gets its slam.
 
 ## Level-up transition
 
 The original's level change re-randomises the stack's colour indices every
-100 ms for two seconds. That is a hue storm, and it is retained â€” but on its own
+100 ms for two seconds. That is a hue storm, and it is retained  but on its own
 it is not a transition, because the *shape* of the board is identical before and
 after. There is nothing to look at except the colour of blocks that have not
 moved, and once the player has seen it twice it stops registering as an event at
@@ -605,24 +605,24 @@ all drain together on the same clock.
 
 That last part was the bug. The drain was originally applied only to blocks
 already at rest, with the live piece, its ghost and the previews pinned to
-`(1.0, 1.0)` at the draw call ï¿½ on the reasoning that the block in flight has to
+`(1.0, 1.0)` at the draw call � on the reasoning that the block in flight has to
 stay maximally legible at 20G. The effect was that the stack went grey while the
 piece the player was steering stayed fully coloured, so the whole thing read as a
 background animation instead of an event happening to the game. Pieces now go
 through `piece_keep(fx, t)`, which is `fx_keep` at `exposure = 0.0` and
 `height = 1.0`: a piece in open air has no neighbours and sits above the stack,
 which is its honest geometry, and makes it behave like any other block. The
-legibility concern is answered by the rim floor rather than by an exemption ï¿½
+legibility concern is answered by the rim floor rather than by an exemption �
 `fx_keep` never lets a rim drop below `MIN_RIM_KEEP`, so the falling piece keeps a
 lit outline on every frame of the transition.
 
 ```
-drain_phase(t)  0 â†’ 1 over the first 55% of the window, then 1 â†’ 0 over the rest
+drain_phase(t)  0 → 1 over the first 55% of the window, then 1 → 0 over the rest
 keep = 1 - drain_phase(t)
 ```
 
 The triangle is a triangle on purpose. The recovery leg is what gives the level
-change an *ending* â€” a drain that only ever goes one way leaves the board grey
+change an *ending*  a drain that only ever goes one way leaves the board grey
 and the player waiting for something to happen, and one that snaps back instantly
 is a blink. `LEVEL_TRANSITION_MS` is unchanged at 2000, and the drain, the hue
 storm and the banner all ride one clock rather than three that can drift apart.
@@ -642,7 +642,7 @@ with the effect, and all three would read as a single event rather than three.
 *Regression tests:* `every_level_names_an_effect_and_neighbours_differ`,
 `a_level_outside_the_scale_still_names_a_real_effect`.
 
-The three are genuinely different functions, not one effect in three clothes â€”
+The three are genuinely different functions, not one effect in three clothes 
 `Depth` is blind to height, `Wave` is blind to exposure, and `Rim` is flat across
 the whole board. *Regression tests:*
 `the_three_effects_are_measurably_different`,
@@ -660,7 +660,7 @@ than in the renderer so the promise the function makes is the one the player
 sees. A block whose rim reached zero would be indistinguishable from an empty
 cell, and the player's next decision depends on telling those two apart at a
 glance. Drained colour is a *darkened grey at the same luminance*, not a scaled
-hue â€” scaling the channels reads as "the block is in shadow", which looks like a
+hue  scaling the channels reads as "the block is in shadow", which looks like a
 lighting bug, where losing saturation reads as what it is.
 *Regression tests:* `a_fully_drained_block_still_has_a_lit_edge`,
 `the_rim_outlasts_the_body`, `a_fully_drained_block_is_grey_rather_than_black`,
@@ -668,13 +668,13 @@ lighting bug, where losing saturation reads as what it is.
 
 **The live piece, its ghost and the hold/next previews never drain.** A level-up
 happens exactly when a new piece arrives, and at 20G the player has a fraction of
-a second to read it â€” so the one block that has to stay maximally legible is the
+a second to read it  so the one block that has to stay maximally legible is the
 one in flight. The drain and the tint both live in `draw_3d_block` rather than in
 `skins::draw_block`, so all five materials get the treatment without any of them
 knowing a level-up exists.
 
 `Grid::exposure` counts eight neighbours, not four. Orthogonals alone put a block
-lying on a flat surface at 0.5 â€” "half-buried" â€” for a block that is entirely in
+lying on a flat surface at 0.5  "half-buried"  for a block that is entirely in
 view, and the diagonals are what separate *resting on* the stack from *wedged
 into* it. Off-board counts as open sky, not as a wall.
 *Regression tests:* `exposure_spans_its_full_range`,
@@ -713,8 +713,8 @@ R              - RESTART IN THIS MODE
 `Escape` reports as both `quit` and `pause`, because it is the pause key
 everywhere else in the game, so the routing is a pure `over_action` that tests
 `quit` *first*. Testing `pause` first would turn `Escape` into "play again", and
-a player who had bound Pause to the same button as Back â€” which the pad bindings
-allow â€” would have no key that leaves the screen at all. The win screen is the
+a player who had bound Pause to the same button as Back  which the pad bindings
+allow  would have no key that leaves the screen at all. The win screen is the
 same screen with a different title and routes identically.
 *Regression tests:* `p_resumes_on_the_game_over_screen`,
 `escape_leaves_rather_than_resuming`,
@@ -722,13 +722,13 @@ same screen with a different title and routes identically.
 `a_win_screen_routes_exactly_like_a_loss`.
 
 ### Events carry their own pose
-`Event::Move`, `Rotate`, `HardDrop` and `Lock` all carry a `Pose` â€” the piece,
+`Event::Move`, `Rotate`, `HardDrop` and `Lock` all carry a `Pose`  the piece,
 its rotation and its origin at the instant the event happened. That is not
 tidiness. Events are read a frame or more after they are pushed, and a hard
 drop locks the piece *and* spawns its successor in the same call, so the live
 `origin` is a brand new piece at the top of the board. Reading live game state
 to place an effect puts the hard-drop burst at the ceiling instead of the
-floor â€” and does it only at high gravity, which is exactly where the effect
+floor  and does it only at high gravity, which is exactly where the effect
 matters most. *Regression tests:*
 `every_pose_event_reports_the_piece_as_it_was`,
 `a_hard_drop_event_reports_the_piece_that_was_dropped`,
@@ -762,7 +762,7 @@ the operating system already provides.
 `src/folderpick.rs` holds the platform layer. On Windows it talks to COM
 directly rather than through a crate, because every Windows dialog crate
 reaches the API through `windows-sys`, whose generated `user32` bindings also
-declare `CloseWindow` â€” which raylib's own C code defines, so the release build
+declare `CloseWindow`  which raylib's own C code defines, so the release build
 fails to link with LNK2005. Declaring the handful of entry points by hand keeps
 the link against `ole32` and `shell32` only. The decision about what a pick
 *means* is a separate pure function, so the "cancel is not the same answer as
@@ -776,7 +776,7 @@ the game-over screen, exactly as the bundled track did.
 
 Playing each track once is not raylib's default and takes two lines of code to
 get right. `LoadMusicStream` sets `Music.looping = true`, and
-`UpdateMusicStream` only calls `StopMusicStream` when `looping` is false â€” with
+`UpdateMusicStream` only calls `StopMusicStream` when `looping` is false  with
 it true the stream wraps internally (`framesProcessed % frameCount`) and keeps
 reporting "playing". So a custom track never *ends*, the playlist's
 "did the last track finish?" check is never true, and the second track is
@@ -816,7 +816,7 @@ mean "no lattice", so the two settings agree.
 All of the original's sound assets are used with their original triggers:
 
 - `Background.ogg` loops through the menus and while a run is live, unless
-  **Use Custom Music** is on â€” see "Custom music" under Options for the
+  **Use Custom Music** is on  see "Custom music" under Options for the
   folder, the track order and the Skip Track key.
 - `Lineclear.ogg` / `MultipleLineclear.ogg` play for 1-3 line clears and
   Tetrises respectively.
@@ -832,7 +832,7 @@ stack flashes through random colours for two seconds.
 
 One raylib detail is load-bearing for the bundled loop. `LoadMusicStream` sets
 `Music.looping = true` and `UpdateMusicStream` only stops and rewinds when
-`looping` is false â€” when it is true it wraps internally with
+`looping` is false  when it is true it wraps internally with
 `framesProcessed % frameCount` and the stream keeps reporting "playing". A
 custom playlist has to play each track *once* and move on, so `src/audio.rs`
 calls `set_looping(false)` on custom tracks and leaves the bundled track alone.
@@ -844,7 +844,7 @@ the advance path testable without an audio device; a named regression test,
 ## Scoring and rules (as in the original)
 
 - Line clears: 100/level per line; T-spin: 400/level; all-clear: 1200/level;
-  hard drop: 2/row; combo: `50 Ã— combo Ã— level Ã— lines`.
+  hard drop: 2/row; combo: `50 × combo × level × lines`.
 - Back-to-back: consecutive T-spin or Tetris clears add a half-bonus on the
   running score, exactly as the original did.
 - A four-line clear lights **TetraFusion!** in the side panel for 2 s, in a
@@ -857,8 +857,8 @@ the advance path testable without an audio device; a named regression test,
   *Regression test:* `every_ten_lines_advances_one_level`.
 - SRS kick tables for J/L/S/T/Z and I are transcribed verbatim; O does not
   kick. Rotation follows the SRS 3-corner T-spin rule.
-- Every rotation state is the previous one turned 90Â° about the centre of the
-  piece's own fixed box (4Ã—4 for I, 3Ã—3 for J/L/S/T/Z, 2Ã—2 for O). The kick
+- Every rotation state is the previous one turned 90° about the centre of the
+  piece's own fixed box (4×4 for I, 3×3 for J/L/S/T/Z, 2×2 for O). The kick
   offsets are only meaningful if all four states agree on where that centre
   sits. *Regression tests:*
   `every_rotation_is_a_rigid_turn_about_the_box_centre`,
@@ -866,7 +866,7 @@ the advance path testable without an audio device; a named regression test,
 
 ## Gravity
 
-The original's curve was `max(50, base Ã— 0.85^(levelâˆ’1))`, which bottoms out
+The original's curve was `max(50, base × 0.85^(level−1))`, which bottoms out
 on a 50 ms floor and then stops moving. Past roughly level 20 a run was played
 at the same speed whether it was level 22 or level 200. This port replaces it
 with a ramp that actually arrives somewhere:
@@ -880,10 +880,10 @@ MAX_GRAVITY                  = 20
 
 Every difficulty reaches exactly 20G at level 20. The floor is what stops a low
 base going faster than 20G; the ceiling is what stops a high base going
-faster, which is deliberate â€” 20G is the top of the scale the game advertises.
+faster, which is deliberate  20G is the top of the scale the game advertises.
 
 Intervals are **rounded**, not truncated. The original's `int()` is a bug at
-this end of the range â€” it discards a whole millisecond out of every interval â€”
+this end of the range  it discards a whole millisecond out of every interval 
 and the point of a 20 ms cadence is that it is a cadence, so it is rounded to
 the nearest real millisecond.
 
@@ -894,7 +894,7 @@ Two details are load-bearing and pinned by tests:
   player starting a run gets exactly the first drop they have always gotten.
   Master is the deliberate exception: it opens at level 15 and keeps its own
   base speed until its first level-up, matching the original. It then keeps
-  levelling *from 15* Ã¢â‚¬â€ the original's rule is `lines // 10 + 1`, which reads 1
+  levelling *from 15* ” the original's rule is `lines // 10 + 1`, which reads 1
   until 141 lines and so never exceeds a level-15 opening, freezing Master at
   level 15 for the whole run. Here that also froze the skin ladder, since every
   level wears a different skin. The level is therefore offset by
@@ -904,7 +904,7 @@ Two details are load-bearing and pinned by tests:
   `master_opens_at_its_base_speed_not_the_level_15_curve`,
   `a_master_run_keeps_levelling_from_where_it_started`,
   `an_ordinary_run_levels_from_one_unchanged`.
-- **At 20G a piece does not fall â€” it lands.** `spawn_piece` puts a new piece
+- **At 20G a piece does not fall  it lands.** `spawn_piece` puts a new piece
   on the floor in the same frame it appears (`Game::at_max_gravity`). That is
   the intended climax of the ramp: the last level is a placement game, not a
   reflex game, and lock delay and floor-sliding are the only things that
@@ -918,7 +918,7 @@ The curve is not a straight line on screen even though it is one in
 `fall_speed_for`, because the cadence is quantised to whole milliseconds: 400 ms
 a row and 396 ms a row are the same piece to a player. The early levels
 therefore read as a handful of distinct steps rather than a slow constant
-creep, and that is the level design â€” `fall_speed_for` is where it lives, and
+creep, and that is the level design  `fall_speed_for` is where it lives, and
 it is a single expression so the two are the same thing.
 
 ## Backgrounds
@@ -931,7 +931,7 @@ Images live in `assets/backgrounds/N.jpg` and are all loaded once at startup.
 The game is fully playable without them: a missing folder or an undecodable
 file is skipped, and the plain backdrop is drawn instead. The photo is
 cover-fitted (scaled to fill, centred, overflow cropped) so no letterboxing
-shows, then dimmed by `DIM` in `src/backgrounds.rs` â€” that dim is load-bearing,
+shows, then dimmed by `DIM` in `src/backgrounds.rs`  that dim is load-bearing,
 since blocks, the ghost piece and the grid lines must stay readable on top of
 an arbitrary picture. It is 100 of 255, about 39%: heavy enough to flatten any
 photo into a backdrop, light enough that you can still see the photo. Raise or
@@ -953,8 +953,8 @@ source:
    `soft_drop_lock_scores_and_advances_the_level`.
 
 2. **Game over almost never triggered.** The original's `check_game_over`
-   tested `grid[0]` â€” the very top row of a 31-row board, roughly 28 rows
-   above where pieces spawn â€” so a stack almost never reached it. The port
+   tested `grid[0]`  the very top row of a 31-row board, roughly 28 rows
+   above where pieces spawn  so a stack almost never reached it. The port
    instead tops out when the stack grows into the hidden spawn buffer, and
    treats a piece that locks entirely above the playfield as a lock-out.
    *Regression tests:* `topping_out_ends_a_marathon`,
@@ -971,12 +971,12 @@ Other corrections made while porting:
 
 - **Floor rendering.** The board renderer mapped rows with a 60 px top offset
   that pushed the floor rows off the bottom of the window; visible rows are
-  now mapped to `(y âˆ’ hidden_rows) Ã— block`, so the stack sits on the floor.
+  now mapped to `(y − hidden_rows) × block`, so the stack sits on the floor.
 - **Soft drop speed.** The original capped fast-fall at a 50 ms/row cadence;
   an early port draft dropped a row every frame (~60 rows/sec), making a held
   Down feel manic. It now falls at the original's twenty rows per second.
 - **Menu navigation.** Menu and Options Up/Down move one entry *per press*
-  by reading the key-press edge, not the held state â€” the original's Pygame
+  by reading the key-press edge, not the held state  the original's Pygame
   event loop did exactly that.
 - Lock delay now starts the moment a piece comes to rest. In the original (and
   an early port draft) a piece sat for nearly a full gravity interval after
@@ -992,7 +992,7 @@ Other corrections made while porting:
   working directory and the exe folder, so the game finds `assets\` whether
   it is run from the crate root, `target\release`, or anywhere in between.
 - **Folder picking for custom music.** The original shelled out to a native
-  dialog â€” `NSOpenPanel` on macOS, `zenity` on Linux â€” and had no Windows
+  dialog  `NSOpenPanel` on macOS, `zenity` on Linux  and had no Windows
   branch at all, so on Windows the feature could not be reached. This port
   opens the real system folder picker on every desktop platform; see "Custom
   music" above. Everything else about custom music (the extensions, the sort
@@ -1035,8 +1035,8 @@ assets/
 controller bindings, custom-music folder scanning (including real folders
 created and removed by the tests), the piece skins, the colour palettes, the
 level-up drain, the Matrix rain glyph table and
-automated live play-throughs â€” no window or assets required. Three of
-them drive the real spawnâ†’steerâ†’dropâ†’lockâ†’clear loop with a bot for hundreds
+automated live play-throughs  no window or assets required. Three of
+them drive the real spawn→steer→drop→lock→clear loop with a bot for hundreds
 of pieces in every mode, which is how "it actually plays" is verified
 headlessly. The bot rotates and scores placements with the standard El-Tetris
 heuristic (aggregate height, buried holes, surface bumpiness, completed rows);
@@ -1045,8 +1045,8 @@ the bot stacking one tower and topping out before it clears anything.
 
 Most of the drain's tests exist because of a sign error, not because the
 arithmetic was hard. `fx_keep` first returned `1.0 - drain_phase(t)`, which is
-*zero at the peak* â€” the drain vanished at exactly the moment it was supposed to
-be strongest â€” and it passed every test that sampled a non-peak frame, because a
+*zero at the peak*  the drain vanished at exactly the moment it was supposed to
+be strongest  and it passed every test that sampled a non-peak frame, because a
 triangle sampled anywhere except its top still has a non-trivial value. The tests
 now sample the peak explicitly and assert the triangle's shape separately from
 what the effect does with it, so the two can no longer be confused.
@@ -1058,9 +1058,9 @@ stays testable. `TF_SMOKE=1` exercises the render loop itself and writes
 ### Verifying visual changes without looking at the screen
 
 `TakeScreenshot` is unreliable on a HiDPI display: it scales the capture to
-1.896Ã— the render size (a 1920Ã—1080 window yields a 3640Ã—2047 PNG) and anchors
+1.896× the render size (a 1920×1080 window yields a 3640×2047 PNG) and anchors
 the actual framebuffer bottom-left in the larger canvas, leaving the remainder
-black. A single screenshot therefore cannot be trusted for layout â€” a mostly
+black. A single screenshot therefore cannot be trusted for layout  a mostly
 black frame is the capture, not the game.
 
 What does work:
@@ -1070,7 +1070,7 @@ What does work:
   framebuffer. This is how the background images were confirmed to render
   (106k pixels of real image content, mean luminance 50.7).
 - **Compare against `smoke_grid.txt`**, which is exact ground truth for the
-  board â€” row/col from the top, no scaling or capture artefacts.
+  board  row/col from the top, no scaling or capture artefacts.
 - **For the scale-to-fit path**, assert on `render::fit` directly and use
   `TF_WINSIZE` to confirm the geometry numerically, rather than eyeballing
   band-by-band luminance profiles.
