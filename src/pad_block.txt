@@ -1,0 +1,471 @@
+/// Which screen is up.
+#[derive(Clone)]
+enum Screen {
+    Menu,
+    Playing,
+    Paused { sel: usize },
+    Over,
+    Settings { sel: usize },
+    /// The Keyboard Keybinds screen, a submenu of Options.
+    ///
+    /// `capturing` is `Some(action)` while waiting for the player to press the
+    /// key they want for that action; every key is ignored for as long as it is
+    /// set, so the Enter that opened the capture cannot bind itself.
+    Keybinds {
+        sel: usize,
+        capturing: Option<settings::Action>,
+    },
+    /// The Controller Keybinds screen, a submenu of Options.
+    ///
+    /// The controller twin of `Keybinds`, and a separate menu for a real
+    /// reason: SDL reports a D-pad as four buttons on a modern pad and as a hat
+    /// on an older one, a DualSense reports it as both, and a Switch Pro
+    /// controller has no X or Y at all. The binding for an action is therefore
+    /// not a fixed button number and has to be something the player can set.
+    PadBinds {
+        sel: usize,
+        capturing: Option<PadAction>,
+    },
+    /// The Menu Nav Bindings screen, reached from Controller Keybinds.
+    ///
+    /// The four menu buttons, so the menus can be driven with no keyboard.
+    PadNavBinds {
+        sel: usize,
+        capturing: Option<NavAction>,
+    },
+}
+
+/// The keybind screen's row count: one per action, plus Back.
+const KEYBIND_ROWS: usize = settings::ACTIONS.len() + 1;
+const KEYBIND_BACK: usize = settings::ACTIONS.len();
+
+/// The controller keybind screen: the menu-nav submenu, one row per action,
+/// then Back. The same shape as the original's, which listed "Menu Nav
+/// Bindings" first and "Back to Options" last.
+const PAD_BIND_ROWS: usize = PAD_ACTION_SLOTS + 2;
+const PAD_NAV_ROW: usize = 0;
+const PAD_BACK_ROW: usize = PAD_ACTION_SLOTS + 1;
+
+/// The menu-nav screen: one row per nav action, then Back.
+const PAD_NAV_ROWS: usize = PAD_NAV_SLOTS + 1;
+const PAD_NAV_BACK_ROW: usize = PAD_NAV_SLOTS;
+
+/// Slots in [`Pad::level`], in [`pad::PAD_ACTIONS`] order.
+///
+/// Written out as constants rather than looked up by name because the sampler
+/// builds its levels positionally; `the_action_and_nav_tables_are_in_the_declared
+/// _order` in the tests is what keeps the two from drifting apart.
+mod act {
+    pub const LEFT: usize = 0;
+    pub const RIGHT: usize = 1;
+    pub const DOWN: usize = 2;
+    pub const ROTATE: usize = 3;
+    pub const HARD_DROP: usize = 4;
+    pub const HOLD: usize = 5;
+    pub const PAUSE: usize = 6;
+    pub const SKIP_TRACK: usize = 7;
+}
+
+/// The count those indices are sized from.
+const PAD_ACTION_SLOTS: usize = pad::PAD_ACTIONS.len();
+const PAD_NAV_SLOTS: usize = pad::NAV_ACTIONS.len();
+
+/// Slots in [`Pad::nav_level`], in [`pad::NAV_ACTIONS`] order.
+mod nav {
+    pub const UP: usize = 0;
+    pub const DOWN: usize = 1;
+    pub const SELECT: usize = 2;
+    pub const BACK: usize = 3;
+}
+
+/// Everything the frame's input needs, sampled once before drawing begins.
+///
+/// raylib 5.x exposes input on the window handle, which is mutably borrowed
+/// for the duration of the frame. Sampling up front keeps the input and draw
+/// phases separate.
+struct Input {
+    left: bool,
+    right: bool,
+    down: bool,
+    down_pressed: bool,
+    left_held: bool,
+    right_held: bool,
+    up: bool,
+    rotate_ccw: bool,
+    hard_drop: bool,
+    hold: bool,
+    /// Jump to the next custom music track (the original's Skip Track).
+    skip_track: bool,
+    delete_row: bool,
+    confirm: bool,
+    pause: bool,
+    quit: bool,
+    restart: bool,
+    /// Controller state, from whichever slot raylib recognises as a pad.
+    ///
+    /// Kept in fields parallel to the keyboard ones so a binding is free to be a
+    /// button, a D-pad direction or a stick direction and nothing downstream has
+    /// to care which. The pad_* names are separate from the keyboard ones because
+    /// the game reads the two differently in two places: the piece trail and the
+    /// screen shake both come from *held* input, and the original sourced those
+    /// from held key state, so the two sources cannot be collapsed into one flag.
+    pad_left: bool,      // press edge -> MoveLeft
+    pad_right: bool,     // press edge -> MoveRight
+    pad_left_held: bool, // -> DAS/ARR repeat, and the piece trail
+    pad_right_held: bool,
+    pad_down_held: bool, // -> soft drop / fast fall, and the trail
+    /// Menu navigation, from the Menu Nav Bindings block. Separate from `up`,
+    /// because on the keyboard Up means Rotate in play but Navigate Up in a menu.
+    nav_up: bool,
+    nav_down: bool,
+    nav_select: bool,
+    nav_back: bool,
+}
+
+/// How many analog axes SDL guarantees on a mapped pad: two sticks, two triggers.
+///
+/// The order is SDL's, and it is what a stored `Binding::Axis` number indexes,
+/// so an axis binding resolves straight into [`read_axes`].
+const AXES: usize = 6;
+
+/// Which pad is in use, and what it was doing last frame.
+///
+/// Carried between frames because two things need history the pad cannot report:
+/// the stick hysteresis needs to know whether a side was already engaged, and
+/// every press edge needs the previous frame's level.
+#[derive(Clone, Copy)]
+struct PadState {
+    /// The slot being read, or `None` when nothing is plugged in.
+    slot: Option<i32>,
+    /// Each axis side's engaged state last frame, for the hysteresis and the
+    /// rebinding capture. `[_][0]` is the negative side, `[_][1]` the positive.
+    axis: [[bool; 2]; AXES],
+    /// Each action's level last frame, so an edge can be derived.
+    action: [bool; PAD_ACTION_SLOTS],
+    /// Each menu action's level last frame.
+    nav: [bool; PAD_NAV_SLOTS],
+}
+
+impl PadState {
+    fn new() -> Self {
+        Self {
+            slot: None,
+            axis: [[false; 2]; AXES],
+            action: [false; PAD_ACTION_SLOTS],
+            nav: [false; PAD_NAV_SLOTS],
+        }
+    }
+
+    /// Forget everything about the previous device.
+    ///
+    /// Called when the slot changes, so a stick left pushed on the old pad cannot
+    /// leave the piece sliding sideways after a different pad is picked up - and
+    /// so a pad unplugged mid-run does not report a phantom release.
+    fn reset_for_new_pad(&mut self, slot: Option<i32>) {
+        if self.slot != slot {
+            *self = Self::new();
+            self.slot = slot;
+        }
+    }
+}
+
+/// The controller's contribution to one frame of input.
+#[derive(Default)]
+struct Pad {
+    /// Press edges for the three movement actions, so one press moves once and
+    /// DAS takes over from there.
+    left: bool,
+    right: bool,
+    down: bool,
+    /// Levels for the same three, which is what feeds DAS and the piece trail.
+    left_held: bool,
+    right_held: bool,
+    down_held: bool,
+    /// Press edges for the one-shot actions.
+    rotate: bool,
+    hard_drop: bool,
+    hold: bool,
+    pause: bool,
+    skip_track: bool,
+    /// Press edges for the menu actions.
+    nav_up: bool,
+    nav_down: bool,
+    nav_select: bool,
+    nav_back: bool,
+    /// The lowest-numbered button that went down this frame, as an SDL button
+    /// number. Only the rebinding screens read it, and it is sampled every frame
+    /// whether or not a capture is running, so a screen that *starts* a capture
+    /// on a press still has that press to record.
+    capture_button: Option<i32>,
+    /// The first stick side that crossed its threshold this frame, as a binding.
+    capture_axis: Option<Binding>,
+}
+
+/// SDL button number to raylib button, for every button a binding can name.
+///
+/// raylib's `GamepadButton` is *not* SDL's numbering - it renumbers the D-pad to
+/// its oddly-named `LEFT_FACE_*` values and shifts the triggers - and the enum is
+/// a bindgen-generated C type with no way back from a value. So this is the
+/// checked stand-in, written out once, exactly as `keys.rs` does it for keycodes.
+/// `the_button_table_matches_the_raylib_enum` in the tests compares every entry
+/// against raylib's own discriminants, so the table cannot silently drift.
+fn button_table() -> &'static [(i32, GamepadButton)] {
+    &[
+        (0, GamepadButton::GAMEPAD_BUTTON_RIGHT_FACE_DOWN),
+        (1, GamepadButton::GAMEPAD_BUTTON_RIGHT_FACE_RIGHT),
+        (2, GamepadButton::GAMEPAD_BUTTON_RIGHT_FACE_LEFT),
+        (3, GamepadButton::GAMEPAD_BUTTON_RIGHT_FACE_UP),
+        (4, GamepadButton::GAMEPAD_BUTTON_MIDDLE_LEFT),
+        (5, GamepadButton::GAMEPAD_BUTTON_MIDDLE),
+        (6, GamepadButton::GAMEPAD_BUTTON_MIDDLE_RIGHT),
+        (7, GamepadButton::GAMEPAD_BUTTON_LEFT_THUMB),
+        (8, GamepadButton::GAMEPAD_BUTTON_RIGHT_THUMB),
+        (9, GamepadButton::GAMEPAD_BUTTON_LEFT_TRIGGER_1),
+        (10, GamepadButton::GAMEPAD_BUTTON_RIGHT_TRIGGER_1),
+        (11, GamepadButton::GAMEPAD_BUTTON_LEFT_FACE_UP),
+        (12, GamepadButton::GAMEPAD_BUTTON_LEFT_FACE_DOWN),
+        (13, GamepadButton::GAMEPAD_BUTTON_LEFT_FACE_LEFT),
+        (14, GamepadButton::GAMEPAD_BUTTON_LEFT_FACE_RIGHT),
+        // SDL's MISC1 (15) has no raylib equivalent: GLFW's gamepad API does not
+        // expose it, so a binding to it is simply always inactive rather than
+        // being quietly mapped onto a different button. The rebinding screen
+        // never offers it, so it can only arrive from a hand-edited file.
+        (pad::LT_BUTTON, GamepadButton::GAMEPAD_BUTTON_LEFT_TRIGGER_2),
+        (pad::RT_BUTTON, GamepadButton::GAMEPAD_BUTTON_RIGHT_TRIGGER_2),
+    ]
+}
+
+/// The raylib button for a stored SDL button number, if there is one.
+fn raylib_button(sdl: i32) -> Option<GamepadButton> {
+    button_table()
+        .iter()
+        .find(|(n, _)| *n == sdl)
+        .map(|(_, k)| *k)
+}
+
+/// Is the given SDL button currently down on `slot`?
+fn button_down(rl: &RaylibHandle, slot: i32, sdl: i32) -> bool {
+    raylib_button(sdl).is_some_and(|k| rl.is_gamepad_button_down(slot, k))
+}
+
+/// Is the given SDL button newly pressed on `slot` this frame?
+fn button_pressed(rl: &RaylibHandle, slot: i32, sdl: i32) -> bool {
+    raylib_button(sdl).is_some_and(|k| rl.is_gamepad_button_pressed(slot, k))
+}
+
+/// All six axes, in SDL's order.
+///
+/// The triggers come back one-sided: SDL reports them as pressure from 0 to 1
+/// and raylib passes that through, so a released trigger is 0.0 rather than
+/// centred. That matters because a trigger binding compared against a *negative*
+/// threshold would read a trigger nobody is touching as "negative" and fire the
+/// action constantly.
+fn read_axes(rl: &RaylibHandle, slot: i32) -> [f32; AXES] {
+    let get = |a| rl.get_gamepad_axis_movement(slot, a).clamp(-1.0, 1.0);
+    [
+        get(GamepadAxis::GAMEPAD_AXIS_LEFT_X),
+        get(GamepadAxis::GAMEPAD_AXIS_LEFT_Y),
+        get(GamepadAxis::GAMEPAD_AXIS_RIGHT_X),
+        get(GamepadAxis::GAMEPAD_AXIS_RIGHT_Y),
+        get(GamepadAxis::GAMEPAD_AXIS_LEFT_TRIGGER).max(0.0),
+        get(GamepadAxis::GAMEPAD_AXIS_RIGHT_TRIGGER).max(0.0),
+    ]
+}
+
+/// Is the D-pad being pushed in the direction `(x, y)`?
+///
+/// SDL button numbers, because that is what the bindings store: up 11, down 12,
+/// left 13, right 14.
+///
+/// One implementation covers every kind of hat because under raylib they *are*
+/// the same thing. GLFW's gamepad API has no hat at all, and SDL folds a real hat
+/// into the D-pad buttons before raylib ever sees it - so a pad that reports a
+/// hat, a pad with four separate buttons and a DualSense reporting both are all
+/// read here, and a `["hat", [x, y]]` binding from a Python settings file means
+/// the same thing as the matching D-pad button binding.
+fn dpad(rl: &RaylibHandle, slot: i32, x: i32, y: i32) -> bool {
+    // A diagonal is not its own binding target, so it resolves to the axis the
+    // player pushed further - which is the one that would have moved the piece.
+    if x != 0 && y != 0 {
+        return if x.abs() >= y.abs() {
+            dpad(rl, slot, x, 0)
+        } else {
+            dpad(rl, slot, 0, y)
+        };
+    }
+    let btn = match (x, y) {
+        (0, -1) => 11,
+        (0, 1) => 12,
+        (-1, 0) => 13,
+        (1, 0) => 14,
+        _ => return false,
+    };
+    button_down(rl, slot, btn)
+}
+
+/// Is `binding` satisfied by the pad's current state?
+///
+/// One place for every kind of input, so a D-pad direction bound to Rotate
+/// behaves exactly like the D-pad driving Move Left, and a stick direction bound
+/// to Hard Drop behaves like a button.
+fn binding_active(
+    rl: &RaylibHandle,
+    slot: i32,
+    binding: Option<Binding>,
+    axes: &[f32; AXES],
+    st: &pad::PadSettings,
+) -> bool {
+    match binding {
+        Some(Binding::Button(b)) => button_down(rl, slot, b),
+        Some(Binding::Hat(x, y)) => dpad(rl, slot, x, y),
+        Some(Binding::Axis { axis, positive }) => {
+            let Some(&v) = usize::try_from(axis).ok().and_then(|i| axes.get(i)) else {
+                return false;
+            };
+            // A trigger is one-sided, so the side half of the binding is ignored
+            // there; comparing it against a negative threshold would read a
+            // resting trigger as pressed.
+            if axis >= 4 {
+                v >= st.analog_threshold
+            } else {
+                st.on_side(v, positive)
+            }
+        }
+        Some(Binding::None) | None => false,
+    }
+}
+
+/// Resolve every axis side's engaged level, once.
+///
+/// Both sides of an axis share one hysteresis band, which is what stops the
+/// piece sliding while a stick sits between "left" and "right": a stick held
+/// slightly off-centre must read as one direction, not as a fresh press on each
+/// side every other frame.
+fn axis_levels(axes: &[f32; AXES], st: &pad::PadSettings, last: &[[bool; 2]; AXES]) -> [[bool; 2]; AXES] {
+    let mut out = [[false; 2]; AXES];
+    for (i, pair) in out.iter_mut().enumerate() {
+        for (k, positive) in [false, true].into_iter().enumerate() {
+            let v = if positive { axes[i] } else { -axes[i] };
+            pair[k] = st.engaged(v, last[i][k]);
+        }
+    }
+    out
+}
+
+/// Sample the pad for this frame.
+///
+/// Four passes, in the order a player would expect them to matter:
+///
+/// 1. the player's own bindings, resolved as levels;
+/// 2. the automatic left-stick steering, so someone who has never opened the
+///    controller settings can still move with the stick - the original's
+///    `JOYAXISMOTION` handler did this unconditionally;
+/// 3. the automatic D-pad steering, gated by `use_dpad`;
+/// 4. edges, derived from this frame's levels and last frame's.
+///
+/// Passes 2 and 3 are additive rather than fallbacks. The original let whichever
+/// source spoke last overwrite the other's flag, but a player who has bound a
+/// face button to Move Left *and* nudges the stick expects both to work, and no
+/// input here can reasonably mean two different things.
+///
+/// Every edge is `now && !last` rather than a per-input "pressed" flag. That is
+/// what makes a held D-pad or a held stick move the piece once and then hand over
+/// to DAS at the player's own ARR - the feel the keyboard gives, and the feel a
+/// controller should give too.
+fn sample_pad(rl: &RaylibHandle, cfg: &settings::Settings, state: &mut PadState) -> Pad {
+    let st = cfg.controller_settings.sanitized();
+    // Re-resolved every frame, which is what makes a controller plugged in after
+    // launch work with no restart.
+    let slot = pad::resolve_slot(st.pad_slot, |i| rl.is_gamepad_available(i));
+    state.reset_for_new_pad(slot);
+    let Some(slot) = slot else {
+        return Pad::default();
+    };
+
+    let axes = read_axes(rl, slot);
+    let levels = axis_levels(&axes, &st, &state.axis);
+
+    // --- pass 1: the player's own bindings ------------------------------
+    let bound = pad::PAD_ACTIONS.map(|a| {
+        binding_active(rl, slot, cfg.controller_controls.get(a), &axes, &st)
+    });
+    let nav_bound = pad::NAV_ACTIONS.map(|a| {
+        binding_active(rl, slot, cfg.controller_menu_navigation.get(a), &axes, &st)
+    });
+
+    // --- pass 2: the automatic left stick -------------------------------
+    let stick_left = levels[0][0];
+    let stick_right = levels[0][1];
+    let stick_down = levels[1][1];
+
+    // --- pass 3: the automatic D-pad ------------------------------------
+    let dpad_left = st.use_dpad && dpad(rl, slot, -1, 0);
+    let dpad_right = st.use_dpad && dpad(rl, slot, 1, 0);
+    let dpad_soft = st.use_dpad && dpad(rl, slot, 0, 1);
+    // The D-pad also drives the menus, and that is not gated. Turning the
+    // automatic piece steering off must not leave a player unable to reach the
+    // Controller Keybinds menu to turn it back on.
+    let dpad_up = dpad(rl, slot, 0, -1);
+    let dpad_menu_down = dpad(rl, slot, 0, 1);
+
+    let mut level = [false; PAD_ACTION_SLOTS];
+    level[act::LEFT] = bound[act::LEFT] || stick_left || dpad_left;
+    level[act::RIGHT] = bound[act::RIGHT] || stick_right || dpad_right;
+    level[act::DOWN] = bound[act::DOWN] || stick_down || dpad_soft;
+    level[act::ROTATE] = bound[act::ROTATE];
+    level[act::HARD_DROP] = bound[act::HARD_DROP];
+    level[act::HOLD] = bound[act::HOLD];
+    level[act::PAUSE] = bound[act::PAUSE];
+    level[act::SKIP_TRACK] = bound[act::SKIP_TRACK];
+
+    let mut nav_level = [false; PAD_NAV_SLOTS];
+    nav_level[nav::UP] = nav_bound[nav::UP] || dpad_up;
+    nav_level[nav::DOWN] = nav_bound[nav::DOWN] || dpad_menu_down;
+    nav_level[nav::SELECT] = nav_bound[nav::SELECT];
+    nav_level[nav::BACK] = nav_bound[nav::BACK];
+
+    // --- pass 4: edges --------------------------------------------------
+    let edge = |now: &[bool], last: &[bool]| -> [bool; PAD_ACTION_SLOTS] {
+        let mut out = [false; PAD_ACTION_SLOTS];
+        for (o, (n, l)) in out.iter_mut().zip(now.iter().zip(last.iter())) {
+            *o = *n && !*l;
+        }
+        out
+    };
+    let edges = edge(&level, &state.action);
+    let nav_edges = edge(&nav_level, &state.nav);
+
+    // --- the rebinding capture ------------------------------------------
+    let capture_button = (0..=pad::RT_BUTTON).find(|&b| button_pressed(rl, slot, b));
+    let capture_axis = (0..AXES).find_map(|i| {
+        let k = usize::from(levels[i][1]);
+        (levels[i][k] && !state.axis[i][k]).then(|| Binding::Axis {
+            axis: i as i32,
+            positive: k == 1,
+        })
+    });
+
+    state.axis = levels;
+    state.action = level;
+    state.nav = nav_level;
+
+    Pad {
+        left: edges[act::LEFT],
+        right: edges[act::RIGHT],
+        down: edges[act::DOWN],
+        left_held: level[act::LEFT],
+        right_held: level[act::RIGHT],
+        down_held: level[act::DOWN],
+        rotate: edges[act::ROTATE],
+        hard_drop: edges[act::HARD_DROP],
+        hold: edges[act::HOLD],
+        pause: edges[act::PAUSE],
+        skip_track: edges[act::SKIP_TRACK],
+        nav_up: nav_edges[nav::UP],
+        nav_down: nav_edges[nav::DOWN],
+        nav_select: nav_edges[nav::SELECT],
+        nav_back: nav_edges[nav::BACK],
+        capture_button,
+        capture_axis,
+    }
+}
