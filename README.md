@@ -1,3 +1,6 @@
+<img width="2490" height="1191" alt="Screenshot 2026-10-01 192615" src="https://github.com/user-attachments/assets/bf5675d5-ee6b-4de8-9550-ccca72a72017" />
+
+
 # TetraFusion 2.1 Rust Edition
 
 A faithful Rust port of **TetraFusion 2.1** by drDOOM69GAMING (MIT-licensed
